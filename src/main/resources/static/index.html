@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.95/Build/Cesium/Cesium.js"></script>
+    <link href="https://cesium.com/downloads/cesiumjs/releases/1.95/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+</head>
+<body>
+<div id="cesiumContainer" style="width:100%;height:100vh;"></div>
+<div id="infoBox">
+    <div>总车辆数: <span id="totalCount">0</span></div>
+    <div>方向1车辆: <span id="direction1Count">0</span></div>
+    <div>方向2车辆: <span id="direction2Count">0</span></div>
+</div>
+<script>
+    Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI4Y2FkYmZlNC0zZTFhLTQzZjgtOTAxMC04ODQ1YWE0NTRiZjAiLCJpZCI6MjE1MzczLCJpYXQiOjE3MTU3NjYwMTR9.mpRLVbgOWVmBAtgdpU68N1S6_UnXYWyALKB_iEwrKf8';
+
+    const viewer = new Cesium.Viewer('cesiumContainer', {
+        terrainProvider: Cesium.createWorldTerrain()
+    });
+
+    // 初始化视角到中国
+    viewer.camera.flyTo({
+        destination: Cesium.Cartesian3.fromDegrees(114.03636,30.84627, 5000)
+    });
+
+    // 获取显示元素
+const totalDisplay = document.getElementById('totalCount');
+const dir1Display = document.getElementById('direction1Count');
+const dir2Display = document.getElementById('direction2Count');
+
+// 单独更新车辆数
+async function updateNumbers() {
+    try {
+        const response = await fetch('http://100.65.38.139:33333/number');
+        const data = await response.json();
+
+        totalDisplay.textContent = data.total;
+        dir1Display.textContent = data.direction1;
+        dir2Display.textContent = data.direction2;
+    } catch (error) {
+        console.error('获取车辆数失败:', error);
+    }
+}
+    async function updatePoints() {
+        const response = await fetch('http://100.65.38.139:33333/points');
+        const points = await response.json();
+
+        viewer.entities.removeAll();
+
+
+        points.forEach(point => {
+            viewer.entities.add({
+                position: Cesium.Cartesian3.fromDegrees(point.longitude, point.latitude),
+                point: {
+                    pixelSize: 8,
+                    color:  Cesium.Color.GREEN,
+                    outlineColor: Cesium.Color.WHITE,
+                    outlineWidth: 2,
+                    disableDepthTestDistance: Number.POSITIVE_INFINITY
+                },
+                 label: {
+                    text: point.name,
+                    font: '14px sans-serif',
+                    pixelOffset: new Cesium.Cartesian2(0, 20),
+                    // 动态判断相机高度：高度超过5000米时隐藏标签
+                    show: new Cesium.CallbackProperty(() => {
+                        const cameraHeight = viewer.camera.positionCartographic.height;
+                        return cameraHeight <= 5000; // 当相机高度<=5000米时显示标签
+                    }, false),
+                    disableDepthTestDistance: Number.POSITIVE_INFINITY
+                }
+            });
+        });
+    }
+// 同时更新点和数据
+async function updateAll() {
+    await updatePoints();
+    await updateNumbers();
+}
+
+    setInterval(updateAll, 200);
+    updatePoints();
+</script>
+</body>
+<style>
+    #infoBox {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        z-index: 1000;
+        background: rgba(40, 40, 40, 0.7);
+        color: white;
+        padding: 15px;
+        border-radius: 5px;
+        font-family: sans-serif;
+        line-height: 1.5;
+    }
+    #infoBox div {
+        margin: 5px 0;
+    }
+</style>
+</html>
