@@ -32,10 +32,14 @@
         <div class="control-group">
             <label>标签布局方案:</label>
             <select id="labelLayout">
-                <option value="5">布局5: 北偏东（30度，300-500m）</option>
-                <option value="6">布局6: 南偏东（150度，300-500m）</option>
-                <option value="7">布局7: 北偏西（330度，300-500m）</option>
-                <option value="8">布局8: 南偏西（210度，300-500m）</option>
+                <option value="1">布局1: 东（90度，300-500m）</option>
+                <option value="2">布局2: 南（180度，300-500m）</option>
+                <option value="3">布局3: 西（270度，300-500m）</option>
+                <option value="4">布局4: 北（0度，300-500m）</option>
+                <option value="5">布局5: 东南（135度，300-500m）</option>
+                <option value="6" selected>布局6: 东北（45度，300-500m）</option>
+                <option value="7">布局7: 西南（225度，300-500m）</option>
+                <option value="8">布局8: 西北（315度，300-500m）</option>
             </select>
         </div>
     </div>
@@ -222,6 +226,8 @@
 
     // 车辆实体存储：车牌号 -> Cesium实体
     const vehicleEntities = new Map();
+    // 最新车辆数据点存储：entityId -> point（全局变量，供避让算法使用）
+    const latestPoints = new Map();
     // 基站实体存储：基站ID -> Cesium实体
     const baseStationEntities = new Map();
     let lastUpdateTime = 0;
@@ -263,8 +269,11 @@
         }
     });
 
-    // 标签布局方案（5-8）
-    let currentLabelLayout = 5; // 默认布局5
+    // 标签布局方案（1-8）：1-东，2-南，3-西，4-北，5-东南，6-东北，7-西南，8-西北
+    let currentLabelLayout = 6; // 默认布局6（东北）
+    
+    // 存储每个标签的当前布局（用于避让时切换布局）
+    const entityLayouts = new Map(); // entityId -> layout (1-8)
     
     // 获取布局选择器
     const labelLayoutSelect = document.getElementById('labelLayout');
@@ -345,8 +354,8 @@
         const newVehicleIds = new Set();
 
         // 处理所有点，如果同一辆车有多个点，只保留最后一个（按顺序处理，后面的覆盖前面的）
-        // 先收集所有车辆的最新位置
-        const latestPoints = new Map();
+        // 先收集所有车辆的最新位置（使用全局的latestPoints Map）
+        latestPoints.clear(); // 清空旧数据
         points.forEach(point => {
             const entityId = `${point.name}_${point.id}`;
             // 如果同一辆车有多个点，保留最后一个（时间戳最新的）
@@ -512,15 +521,62 @@
         
         // 再次请求渲染
         viewer.scene.requestRender();
+        
+        // 在所有标签更新完成后，执行标签避让算法
+        // 使用setTimeout确保所有标签位置都已更新
+        setTimeout(() => {
+            try {
+                if (vehicleEntities && vehicleEntities.size > 0) {
+                    avoidLabelOverlap();
+                }
+            } catch (e) {
+                console.error('[避让算法调用] 错误:', e);
+            }
+        }, 100);
+        
+        // 启动持续运行的避让算法（每1秒运行一次，更快响应重叠）
+        if (!window.labelAvoidanceInterval) {
+            window.labelAvoidanceInterval = setInterval(() => {
+                try {
+                    if (!isPaused && vehicleEntities && vehicleEntities.size > 0) {
+                        avoidLabelOverlap();
+                    }
+                } catch (e) {
+                    console.error('[避让算法定时器] 错误:', e);
+                }
+            }, 1000); // 改为1秒运行一次，更快响应重叠
+        }
 
         console.log(`更新${points.length}个数据点，处理后${latestPoints.size}辆车，耗时${Date.now() - startTime}ms`);
     }
     
-    // 标签避让算法：基于3D空间的碰撞检测和动态调整
-    // 直接调整eyeOffset（3D空间偏移），避免标签在3D空间中重叠
+    // 字符串哈希函数（用于生成稳定的方向选择）- 提前定义
+    function hashString(str) {
+        if (!str) return 0;
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            const char = str.charCodeAt(i);
+            hash = ((hash << 5) - hash) + char;
+            hash = hash & hash; // 转换为32位整数
+        }
+        return hash;
+    }
+    
+    // 标签避让算法：基于屏幕空间的碰撞检测和动态调整
+    // 将标签投影到屏幕坐标，检测屏幕上的矩形重叠，避免标签在屏幕上重叠显示
     function avoidLabelOverlap() {
         try {
-            // 收集所有车辆和标签的3D位置信息
+            // 检查是否有车辆数据
+            if (!vehicleEntities || vehicleEntities.size === 0) {
+                return;
+            }
+            
+            // 检查viewer是否已初始化
+            if (!viewer || !viewer.scene || !viewer.camera) {
+                return;
+            }
+            
+            // 1. 收集所有标签的屏幕坐标和边界框
             const labelInfos = [];
             
             vehicleEntities.forEach((entity, entityId) => {
@@ -541,8 +597,7 @@
                         eyeOffset = new Cesium.Cartesian3(0, 0, 0);
                     }
                     
-                    // 计算标签的实际3D世界位置
-                    // eyeOffset是相对于相机的，需要转换为世界坐标
+                    // 计算标签的3D世界位置
                     const camera = viewer.camera;
                     const cameraRight = camera.right;
                     const cameraUp = camera.up;
@@ -557,189 +612,490 @@
                     
                     const labelWorldPos = Cesium.Cartesian3.add(vehicleWorldPos, worldOffset, new Cesium.Cartesian3());
                     
+                    // 投影到屏幕坐标
+                    const screenPos = Cesium.SceneTransforms.wgs84ToWindowCoordinates(viewer.scene, labelWorldPos);
+                    if (!screenPos) return;
+                    
+                    // 估算标签的屏幕边界框（需要根据实际标签大小调整）
+                    const labelWidth = 120;  // 标签宽度（像素）
+                    const labelHeight = 40;  // 标签高度（像素）
+                    const padding = 5;       // 额外间距（像素）
+                    
+                    const screenRect = {
+                        left: screenPos.x - labelWidth / 2 - padding,
+                        right: screenPos.x + labelWidth / 2 + padding,
+                        top: screenPos.y - labelHeight / 2 - padding,
+                        bottom: screenPos.y + labelHeight / 2 + padding,
+                        centerX: screenPos.x,
+                        centerY: screenPos.y
+                    };
+                    
                     labelInfos.push({
                         entity: entity,
                         entityId: entityId,
                         vehiclePos: vehicleWorldPos,
-                        labelPos: labelWorldPos,
-                        eyeOffset: eyeOffset
+                        labelWorldPos: labelWorldPos,
+                        eyeOffset: eyeOffset,
+                        screenPos: screenPos,
+                        screenRect: screenRect
                     });
                 } catch (e) {
                     // 忽略单个标签的错误
                 }
             });
             
-            // 检测并解决3D空间中的重叠
-            const minSeparationDistance = 80; // 最小分离距离（米）
-            const maxIterations = 3;
+            // 2. 检测屏幕空间重叠并调整（多标签避让 + 切换布局方向策略）
+            const minSeparation = 250; // 最小分离距离（像素）- 增加到250像素，让标签更松散
+            const preferredSeparation = 300; // 首选分离距离（像素）- 理想情况下标签应该保持这个距离
             
-            for (let iteration = 0; iteration < maxIterations; iteration++) {
-                let hasOverlap = false;
-                
-                for (let i = 0; i < labelInfos.length; i++) {
-                    for (let j = i + 1; j < labelInfos.length; j++) {
-                        const info1 = labelInfos[i];
-                        const info2 = labelInfos[j];
-                        
-                        // 计算两个标签之间的3D距离
-                        const distance = Cesium.Cartesian3.distance(info1.labelPos, info2.labelPos);
-                        
-                        // 如果距离太近，需要分离
-                        if (distance < minSeparationDistance) {
-                            hasOverlap = true;
-                            
-                            // 计算分离向量（从info1指向info2）
-                            const separationVector = Cesium.Cartesian3.subtract(
-                                info2.labelPos, 
-                                info1.labelPos, 
-                                new Cesium.Cartesian3()
-                            );
-                            
-                            // 归一化分离向量
-                            const separationLength = Cesium.Cartesian3.magnitude(separationVector);
-                            
-                            if (separationLength < 0.001) {
-                                // 如果距离太近，随机分离
-                                const randomAngle = Math.random() * Math.PI * 2;
-                                const randomElevation = (Math.random() - 0.5) * Math.PI / 4; // -22.5到22.5度
-                                const separation = minSeparationDistance / 2;
-                                
-                                // 在水平面上随机方向
-                                const offsetX = Math.cos(randomAngle) * Math.cos(randomElevation) * separation;
-                                const offsetY = Math.sin(randomAngle) * Math.cos(randomElevation) * separation;
-                                const offsetZ = Math.sin(randomElevation) * separation;
-                                
-                                // 转换为相机空间的eyeOffset
-                                const camera = viewer.camera;
-                                const worldOffset1 = new Cesium.Cartesian3(-offsetX, -offsetY, -offsetZ);
-                                const worldOffset2 = new Cesium.Cartesian3(offsetX, offsetY, offsetZ);
-                                
-                                // 投影到相机坐标系
-                                const eyeOffset1X = Cesium.Cartesian3.dot(worldOffset1, camera.right);
-                                const eyeOffset1Y = Cesium.Cartesian3.dot(worldOffset1, camera.up);
-                                const eyeOffset1Z = Cesium.Cartesian3.dot(worldOffset1, camera.direction);
-                                
-                                const eyeOffset2X = Cesium.Cartesian3.dot(worldOffset2, camera.right);
-                                const eyeOffset2Y = Cesium.Cartesian3.dot(worldOffset2, camera.up);
-                                const eyeOffset2Z = Cesium.Cartesian3.dot(worldOffset2, camera.direction);
-                                
-                                info1.eyeOffset.x += eyeOffset1X;
-                                info1.eyeOffset.y += eyeOffset1Y;
-                                info1.eyeOffset.z += eyeOffset1Z;
-                                
-                                info2.eyeOffset.x += eyeOffset2X;
-                                info2.eyeOffset.y += eyeOffset2Y;
-                                info2.eyeOffset.z += eyeOffset2Z;
-                            } else {
-                                // 沿分离方向移动
-                                const separation = (minSeparationDistance - distance) / 2;
-                                const normalizedVector = Cesium.Cartesian3.multiplyByScalar(
-                                    separationVector,
-                                    separation / separationLength,
-                                    new Cesium.Cartesian3()
-                                );
-                                
-                                // 转换为相机空间的eyeOffset
-                                const camera = viewer.camera;
-                                const worldOffset1 = Cesium.Cartesian3.multiplyByScalar(normalizedVector, -1, new Cesium.Cartesian3());
-                                const worldOffset2 = normalizedVector;
-                                
-                                // 投影到相机坐标系
-                                const eyeOffset1X = Cesium.Cartesian3.dot(worldOffset1, camera.right);
-                                const eyeOffset1Y = Cesium.Cartesian3.dot(worldOffset1, camera.up);
-                                const eyeOffset1Z = Cesium.Cartesian3.dot(worldOffset1, camera.direction);
-                                
-                                const eyeOffset2X = Cesium.Cartesian3.dot(worldOffset2, camera.right);
-                                const eyeOffset2Y = Cesium.Cartesian3.dot(worldOffset2, camera.up);
-                                const eyeOffset2Z = Cesium.Cartesian3.dot(worldOffset2, camera.direction);
-                                
-                                info1.eyeOffset.x += eyeOffset1X;
-                                info1.eyeOffset.y += eyeOffset1Y;
-                                info1.eyeOffset.z += eyeOffset1Z;
-                                
-                                info2.eyeOffset.x += eyeOffset2X;
-                                info2.eyeOffset.y += eyeOffset2Y;
-                                info2.eyeOffset.z += eyeOffset2Z;
-                            }
-                            
-                            // 更新标签的3D位置（用于下次迭代）
-                            const camera = viewer.camera;
-                            const worldOffset1 = new Cesium.Cartesian3(
-                                camera.right.x * info1.eyeOffset.x + camera.up.x * info1.eyeOffset.y + camera.direction.x * info1.eyeOffset.z,
-                                camera.right.y * info1.eyeOffset.x + camera.up.y * info1.eyeOffset.y + camera.direction.y * info1.eyeOffset.z,
-                                camera.right.z * info1.eyeOffset.x + camera.up.z * info1.eyeOffset.y + camera.direction.z * info1.eyeOffset.z
-                            );
-                            info1.labelPos = Cesium.Cartesian3.add(info1.vehiclePos, worldOffset1, new Cesium.Cartesian3());
-                            
-                            const worldOffset2 = new Cesium.Cartesian3(
-                                camera.right.x * info2.eyeOffset.x + camera.up.x * info2.eyeOffset.y + camera.direction.x * info2.eyeOffset.z,
-                                camera.right.y * info2.eyeOffset.x + camera.up.y * info2.eyeOffset.y + camera.direction.y * info2.eyeOffset.z,
-                                camera.right.z * info2.eyeOffset.x + camera.up.z * info2.eyeOffset.y + camera.direction.z * info2.eyeOffset.z
-                            );
-                            info2.labelPos = Cesium.Cartesian3.add(info2.vehiclePos, worldOffset2, new Cesium.Cartesian3());
-                        }
-                    }
-                }
-                
-                if (!hasOverlap) break;
+            // 调试：输出检测到的标签数量
+            if (labelInfos.length > 0) {
+                console.log(`[避让算法] 检测到 ${labelInfos.length} 个标签`);
             }
             
-            // 应用调整后的eyeOffset（平滑过渡）
-            labelInfos.forEach(({ entity, eyeOffset }) => {
+            // 存储需要避让的标签（允许多个标签同时避让，实现更松散的分布）
+            const labelsToAvoid = new Set();
+            // 存储每个标签的重叠信息，用于更智能的避让决策
+            const overlapInfo = new Map(); // entityId -> { overlaps: Set<entityId>, minDistance: number }
+            
+            // 存储每个标签的避让状态，避免频繁切换布局
+            const avoidanceState = new Map(); // entityId -> { lastAvoidanceTime, lastLayout }
+            
+            // 检测重叠和距离
+            for (let i = 0; i < labelInfos.length; i++) {
+                for (let j = i + 1; j < labelInfos.length; j++) {
+                    const info1 = labelInfos[i];
+                    const info2 = labelInfos[j];
+                    
+                    // 计算分离向量（屏幕空间）
+                    const dx = info2.screenRect.centerX - info1.screenRect.centerX;
+                    const dy = info2.screenRect.centerY - info1.screenRect.centerY;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    
+                    // 检测屏幕矩形重叠或距离过近
+                    if (isRectOverlap(info1.screenRect, info2.screenRect) || distance < minSeparation) {
+                        const key1 = info1.entityId;
+                        const key2 = info2.entityId;
+                        
+                        // 记录重叠信息
+                        if (!overlapInfo.has(key1)) {
+                            overlapInfo.set(key1, { overlaps: new Set(), minDistance: Infinity });
+                        }
+                        if (!overlapInfo.has(key2)) {
+                            overlapInfo.set(key2, { overlaps: new Set(), minDistance: Infinity });
+                        }
+                        
+                        overlapInfo.get(key1).overlaps.add(key2);
+                        overlapInfo.get(key2).overlaps.add(key1);
+                        overlapInfo.get(key1).minDistance = Math.min(overlapInfo.get(key1).minDistance, distance);
+                        overlapInfo.get(key2).minDistance = Math.min(overlapInfo.get(key2).minDistance, distance);
+                        
+                        // 如果距离太近，两个标签都需要避让（实现更松散的分布）
+                        if (distance < minSeparation) {
+                            labelsToAvoid.add(key1);
+                            labelsToAvoid.add(key2);
+                        } else if (isRectOverlap(info1.screenRect, info2.screenRect)) {
+                            // 如果只是重叠但距离较远，只让其中一个避让（选择重叠更多的）
+                            const overlapCount1 = overlapInfo.get(key1).overlaps.size;
+                            const overlapCount2 = overlapInfo.get(key2).overlaps.size;
+                            if (overlapCount1 > overlapCount2) {
+                                labelsToAvoid.add(key1);
+                            } else if (overlapCount2 > overlapCount1) {
+                                labelsToAvoid.add(key2);
+                            } else {
+                                // 重叠数量相同，选择ID较小的
+                                const avoidEntityId = key1 < key2 ? key1 : key2;
+                                labelsToAvoid.add(avoidEntityId);
+                            }
+                        }
+                        
+                        // 调试：输出重叠信息
+                        console.log(`[避让检测] 标签 ${key1} 和 ${key2} 重叠/过近，距离 ${distance.toFixed(1)} 像素`);
+                    }
+                }
+            }
+            
+            // 调试：输出需要避让的标签数量
+            console.log(`[避让算法] 检测到 ${labelsToAvoid.size} 个标签需要避让:`, Array.from(labelsToAvoid));
+            
+            // 3. 对需要避让的标签切换布局方向
+            labelsToAvoid.forEach((entityId) => {
                 try {
-                    // 获取当前的eyeOffset
-                    let currentEyeOffset = entity.label.eyeOffset;
-                    if (!currentEyeOffset) {
-                        currentEyeOffset = new Cesium.Cartesian3(0, 0, 0);
-                    } else if (currentEyeOffset instanceof Cesium.Cartesian3) {
-                        currentEyeOffset = currentEyeOffset;
-                    } else if (currentEyeOffset && currentEyeOffset.getValue) {
-                        currentEyeOffset = currentEyeOffset.getValue();
-                    } else {
-                        currentEyeOffset = new Cesium.Cartesian3(0, 0, 0);
+                    const entity = vehicleEntities.get(entityId);
+                    if (!entity) return;
+                    
+                    // 获取当前布局（如果没有，使用默认布局）
+                    let currentLayout = entityLayouts.get(entityId);
+                    if (!currentLayout) {
+                        currentLayout = currentLabelLayout;
+                        entityLayouts.set(entityId, currentLayout);
                     }
                     
-                    // 平滑插值（0.4的插值系数，平衡响应速度和稳定性）
-                    const lerpFactor = 0.4;
-                    const newX = currentEyeOffset.x + (eyeOffset.x - currentEyeOffset.x) * lerpFactor;
-                    const newY = currentEyeOffset.y + (eyeOffset.y - currentEyeOffset.y) * lerpFactor;
-                    const newZ = currentEyeOffset.z + (eyeOffset.z - currentEyeOffset.z) * lerpFactor;
-                    
-                    // 限制最大偏移（避免标签偏离太远，单位：米）
-                    const maxOffset = 250; // 最大250米
-                    const currentMagnitude = Math.sqrt(newX * newX + newY * newY + newZ * newZ);
-                    if (currentMagnitude > maxOffset) {
-                        const scale = maxOffset / currentMagnitude;
-                        entity.label.eyeOffset = new Cesium.Cartesian3(newX * scale, newY * scale, newZ * scale);
-                    } else {
-                        entity.label.eyeOffset = new Cesium.Cartesian3(newX, newY, newZ);
+                    // 检查是否最近已经避让过（减少冷却时间到1.5秒，让避让更及时）
+                    const lastState = avoidanceState.get(entityId);
+                    const now = Date.now();
+                    if (lastState && (now - lastState.lastAvoidanceTime < 1500)) {
+                        // 最近避让过，但如果当前布局仍然有重叠，仍然需要避让
+                        const currentInfo = labelInfos.find(info => info.entityId === entityId);
+                        if (currentInfo) {
+                            let hasOverlap = false;
+                            for (const otherInfo of labelInfos) {
+                                if (otherInfo.entityId === entityId) continue;
+                                if (isRectOverlap(currentInfo.screenRect, otherInfo.screenRect)) {
+                                    hasOverlap = true;
+                                    break;
+                                }
+                            }
+                            if (!hasOverlap) {
+                                // 没有重叠，跳过避让
+                                return;
+                            }
+                        } else {
+                            // 找不到当前标签信息，跳过
+                            return;
+                        }
                     }
                     
-                    // 修复2：标签避让算法更新eyeOffset后，强制触发引导线positions更新
+                    // 选择最能长期避让的布局（测试所有可能的布局，选择与其他标签重叠最少的）
+                    const availableLayouts = [1, 2, 3, 4, 5, 6, 7, 8]; // 8个方向
+                    const otherLayouts = availableLayouts.filter(l => l !== currentLayout);
+                    
+                    if (otherLayouts.length > 0) {
+                        // 获取当前标签的车辆位置
+                        const point = latestPoints.get(entityId);
+                        if (point && entity.position) {
+                            const vehiclePosition = entity.position.getValue();
+                            if (vehiclePosition) {
+                                // 测试每个可能的布局，找到与其他标签重叠最少且距离最远的布局
+                                let bestLayout = currentLayout;
+                                let minOverlaps = Infinity;
+                                let bestAvgDistance = 0;
+                                
+                                // 先计算当前布局的评分
+                                const currentInfo = labelInfos.find(info => info.entityId === entityId);
+                                if (currentInfo) {
+                                    let currentOverlaps = 0;
+                                    let currentTotalDist = 0;
+                                    let currentNeighborCount = 0;
+                                    for (const otherInfo of labelInfos) {
+                                        if (otherInfo.entityId === entityId) continue;
+                                        if (isRectOverlap(currentInfo.screenRect, otherInfo.screenRect)) {
+                                            currentOverlaps++;
+                                        }
+                                        const dx = currentInfo.screenRect.centerX - otherInfo.screenRect.centerX;
+                                        const dy = currentInfo.screenRect.centerY - otherInfo.screenRect.centerY;
+                                        const dist = Math.sqrt(dx * dx + dy * dy);
+                                        currentTotalDist += dist;
+                                        currentNeighborCount++;
+                                    }
+                                    minOverlaps = currentOverlaps;
+                                    bestAvgDistance = currentNeighborCount > 0 ? currentTotalDist / currentNeighborCount : 0;
+                                }
+                                
+                                for (const testLayout of otherLayouts) {
+                                    // 计算使用该布局时的标签位置
+                                    const { offsetX, offsetY, offsetZ } = calculateLabelOffset(point, entityId, vehiclePosition, testLayout);
+                                    
+                                    // 将eyeOffset转换为世界坐标
+                                    const camera = viewer.camera;
+                                    const worldOffset = new Cesium.Cartesian3(
+                                        camera.right.x * offsetX + camera.up.x * offsetY + camera.direction.x * offsetZ,
+                                        camera.right.y * offsetX + camera.up.y * offsetY + camera.direction.y * offsetZ,
+                                        camera.right.z * offsetX + camera.up.z * offsetY + camera.direction.z * offsetZ
+                                    );
+                                    const testLabelWorldPos = Cesium.Cartesian3.add(vehiclePosition, worldOffset, new Cesium.Cartesian3());
+                                    
+                                    // 投影到屏幕坐标
+                                    const testScreenPos = Cesium.SceneTransforms.wgs84ToWindowCoordinates(viewer.scene, testLabelWorldPos);
+                                    if (!testScreenPos) continue;
+                                    
+                                    // 计算屏幕矩形
+                                    const labelWidth = 120;
+                                    const labelHeight = 40;
+                                    const padding = 5;
+                                    const testScreenRect = {
+                                        left: testScreenPos.x - labelWidth / 2 - padding,
+                                        right: testScreenPos.x + labelWidth / 2 + padding,
+                                        top: testScreenPos.y - labelHeight / 2 - padding,
+                                        bottom: testScreenPos.y + labelHeight / 2 + padding,
+                                        centerX: testScreenPos.x,
+                                        centerY: testScreenPos.y
+                                    };
+                                    
+                                    // 计算与其他标签的重叠数量和平均距离
+                                    let overlapCount = 0;
+                                    let totalDistance = 0;
+                                    let neighborCount = 0;
+                                    let minDistance = Infinity;
+                                    
+                                    for (const otherInfo of labelInfos) {
+                                        if (otherInfo.entityId === entityId) continue; // 跳过自己
+                                        
+                                        // 计算屏幕距离
+                                        const dx = testScreenRect.centerX - otherInfo.screenRect.centerX;
+                                        const dy = testScreenRect.centerY - otherInfo.screenRect.centerY;
+                                        const distance = Math.sqrt(dx * dx + dy * dy);
+                                        
+                                        if (isRectOverlap(testScreenRect, otherInfo.screenRect)) {
+                                            overlapCount++;
+                                        }
+                                        
+                                        // 记录距离信息（用于选择更松散的布局）
+                                        totalDistance += distance;
+                                        neighborCount++;
+                                        minDistance = Math.min(minDistance, distance);
+                                    }
+                                    
+                                    // 计算平均距离
+                                    const avgDistance = neighborCount > 0 ? totalDistance / neighborCount : 0;
+                                    
+                                    // 优化布局选择策略：
+                                    // 1. 优先选择重叠最少的布局
+                                    // 2. 如果重叠数量相同，选择平均距离最远的布局（实现更松散的分布）
+                                    let isBetter = false;
+                                    if (overlapCount < minOverlaps) {
+                                        // 重叠更少，直接选择
+                                        isBetter = true;
+                                    } else if (overlapCount === minOverlaps && avgDistance > bestAvgDistance) {
+                                        // 重叠数量相同，但平均距离更远，选择它（实现更松散的分布）
+                                        isBetter = true;
+                                    }
+                                    
+                                    if (isBetter) {
+                                        minOverlaps = overlapCount;
+                                        bestAvgDistance = avgDistance;
+                                        bestLayout = testLayout;
+                                    }
+                                }
+                                
+                                // 如果找到了更好的布局，应用它
+                                if (bestLayout !== currentLayout) {
+                                    console.log(`[标签避让] ${entityId}: 从布局${currentLayout}切换到布局${bestLayout}，重叠数从${minOverlaps + 1}减少到${minOverlaps}`);
+                                    
+                                    // 更新布局（关键：必须在设置eyeOffset之前更新）
+                                    entityLayouts.set(entityId, bestLayout);
+                                    
+                                    // 使用最佳布局重新计算eyeOffset
+                                    const { offsetX, offsetY, offsetZ } = calculateLabelOffset(point, entityId, vehiclePosition, bestLayout);
+                                    
+                                    // 直接设置eyeOffset（不通过updateLabelPosition，避免被覆盖）
+                                    entity.label.eyeOffset = new Cesium.Cartesian3(offsetX, offsetY, offsetZ);
+                                    
+                                    console.log(`[标签避让] ${entityId}: 已设置eyeOffset为布局${bestLayout}的偏移`, { offsetX, offsetY, offsetZ });
+                                    
+                                    // 记录避让状态
+                                    avoidanceState.set(entityId, {
+                                        lastAvoidanceTime: Date.now(),
+                                        lastLayout: bestLayout
+                                    });
+                                    
+                                    // 强制触发引导线更新（多重方式确保更新）
+                                    // 关键：避让算法修改eyeOffset后，必须立即更新引导线，确保引导线能正确显示
+                                    const point = latestPoints.get(entityId);
+                                    if (point) {
+                                        // 方式1：立即调用updateLabelPosition来更新引导线
+                                        // updateLabelPosition中有逻辑保护避让布局的eyeOffset，所以可以安全调用
+                                        // 它会重新创建引导线的CallbackProperty，确保能访问到最新的eyeOffset
+                                        updateLabelPosition(entity, point, entityId, vehiclePosition);
+                                        
+                                        // 方式2：额外确保引导线的positions能正确更新
+                                        // 立即重新赋值positions，强制触发CallbackProperty重新计算
+                                        if (entity.polyline && entity.polyline.positions) {
+                                            try {
+                                                const positions = entity.polyline.positions;
+                                                if (positions instanceof Cesium.CallbackProperty) {
+                                                    // 通过重新赋值来强制触发CallbackProperty重新计算
+                                                    entity.polyline.positions = positions;
+                                                }
+                                            } catch (e) {
+                                                console.warn(`[引导线更新] ${entityId}: 更新positions失败`, e);
+                                            }
+                                        }
+                                    }
+                                    
+                                    // 强制触发渲染
+                                    viewer.scene.requestRender();
+                                } else {
+                                    console.log(`[标签避让] ${entityId}: 当前布局${currentLayout}已是最优，重叠数${minOverlaps}`);
+                                    // 没有找到更好的布局，记录当前状态
+                                    avoidanceState.set(entityId, {
+                                        lastAvoidanceTime: Date.now(),
+                                        lastLayout: currentLayout
+                                    });
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`[标签避让] ${entityId} 切换布局失败:`, e);
+                }
+            });
+            
+            // 布局切换后，强制更新所有引导线并重新渲染场景
+            // 确保所有修改了eyeOffset的标签的引导线都能正确显示
+            let updatedCount = 0;
+            labelsToAvoid.forEach((entityId) => {
+                const entity = vehicleEntities.get(entityId);
+                if (entity) {
+                    const point = latestPoints.get(entityId);
+                    if (point && entity.position) {
+                        try {
+                            const vehiclePosition = entity.position.getValue();
+                            if (vehiclePosition) {
+                                // 调用updateLabelPosition来更新引导线
+                                // 这会重新创建引导线的CallbackProperty，确保能访问到最新的eyeOffset
+                                updateLabelPosition(entity, point, entityId, vehiclePosition);
+                                updatedCount++;
+                            }
+                        } catch (e) {
+                            console.warn(`[引导线更新] ${entityId}: 更新失败`, e);
+                        }
+                    }
+                    
+                    // 额外确保引导线的positions能正确更新
                     if (entity.polyline && entity.polyline.positions) {
                         try {
                             const positions = entity.polyline.positions;
                             if (positions instanceof Cesium.CallbackProperty) {
-                                // 通过重新赋值来强制触发更新
+                                // 通过重新赋值来强制触发CallbackProperty重新计算
                                 entity.polyline.positions = positions;
                             }
                         } catch (e) {
                             // 忽略错误
                         }
                     }
-                } catch (e) {
-                    // 忽略单个标签的错误
                 }
             });
             
-            // 修复2：标签避让算法完成后，强制重新渲染场景
+            if (updatedCount > 0) {
+                console.log(`[避让算法] 已更新 ${updatedCount} 个标签的引导线`);
+            }
+            
+            // 标签避让算法完成后，强制重新渲染场景
             viewer.scene.requestRender();
         } catch (e) {
-            console.error('[标签避让] 错误:', e);
+            console.error('[屏幕空间标签避让] 错误:', e);
+        }
+    }
+    
+    // 检测矩形重叠（屏幕空间）
+    function isRectOverlap(rect1, rect2) {
+        return !(rect1.right < rect2.left || 
+                 rect1.left > rect2.right || 
+                 rect1.bottom < rect2.top || 
+                 rect1.top > rect2.bottom);
+    }
+    
+    
+    // 调整标签的屏幕偏移（将屏幕偏移转换为eyeOffset）
+    function adjustLabelScreenOffset(labelInfo, screenOffsetX, screenOffsetY) {
+        try {
+            const camera = viewer.camera;
+            
+            // 计算相机到标签的距离
+            const distance = Cesium.Cartesian3.distance(
+                viewer.camera.position,
+                labelInfo.labelWorldPos
+            );
+            
+            if (distance < 1) {
+                // 距离太近，跳过
+                return;
+            }
+            
+            // 使用更准确的方法：通过屏幕坐标反推世界坐标
+            // 获取当前标签的屏幕位置
+            const currentScreenPos = labelInfo.screenPos;
+            if (!currentScreenPos) return;
+            
+            // 计算目标屏幕位置
+            const targetScreenX = currentScreenPos.x + screenOffsetX;
+            const targetScreenY = currentScreenPos.y + screenOffsetY;
+            
+            // 使用Cesium的pickRay来将屏幕坐标转换为世界坐标
+            // 创建一个从相机到标签方向的射线
+            const ray = viewer.camera.getPickRay(new Cesium.Cartesian2(targetScreenX, targetScreenY));
+            if (!ray) return;
+            
+            // 计算射线与标签所在平面的交点
+            // 使用标签到相机的距离来确定交点
+            const direction = Cesium.Cartesian3.normalize(ray.direction, new Cesium.Cartesian3());
+            const targetWorldPos = Cesium.Cartesian3.add(
+                viewer.camera.position,
+                Cesium.Cartesian3.multiplyByScalar(direction, distance, new Cesium.Cartesian3()),
+                new Cesium.Cartesian3()
+            );
+            
+            // 计算需要的世界坐标偏移
+            const worldOffset = Cesium.Cartesian3.subtract(
+                targetWorldPos,
+                labelInfo.labelWorldPos,
+                new Cesium.Cartesian3()
+            );
+            
+            // 将世界坐标偏移转换为eyeOffset（相机空间）
+            const cameraRight = camera.right;
+            const cameraUp = camera.up;
+            const cameraForward = camera.direction;
+            
+            const eyeOffsetX = Cesium.Cartesian3.dot(worldOffset, cameraRight);
+            const eyeOffsetY = Cesium.Cartesian3.dot(worldOffset, cameraUp);
+            const eyeOffsetZ = Cesium.Cartesian3.dot(worldOffset, cameraForward);
+            
+            labelInfo.eyeOffset.x += eyeOffsetX;
+            labelInfo.eyeOffset.y += eyeOffsetY;
+            labelInfo.eyeOffset.z += eyeOffsetZ;
+        } catch (e) {
+            console.warn('[adjustLabelScreenOffset] 错误:', e);
+        }
+    }
+    
+    // 更新标签的屏幕位置
+    function updateScreenPosition(labelInfo) {
+        try {
+            const camera = viewer.camera;
+            
+            // 将eyeOffset转换为世界坐标偏移
+            const worldOffset = new Cesium.Cartesian3(
+                camera.right.x * labelInfo.eyeOffset.x + camera.up.x * labelInfo.eyeOffset.y + camera.direction.x * labelInfo.eyeOffset.z,
+                camera.right.y * labelInfo.eyeOffset.x + camera.up.y * labelInfo.eyeOffset.y + camera.direction.y * labelInfo.eyeOffset.z,
+                camera.right.z * labelInfo.eyeOffset.x + camera.up.z * labelInfo.eyeOffset.y + camera.direction.z * labelInfo.eyeOffset.z
+            );
+            
+            // 更新标签的世界位置
+            labelInfo.labelWorldPos = Cesium.Cartesian3.add(
+                labelInfo.vehiclePos,
+                worldOffset,
+                new Cesium.Cartesian3()
+            );
+            
+            // 重新投影到屏幕坐标
+            const screenPos = Cesium.SceneTransforms.wgs84ToWindowCoordinates(
+                viewer.scene,
+                labelInfo.labelWorldPos
+            );
+            
+            if (screenPos) {
+                labelInfo.screenPos = screenPos;
+                
+                // 更新屏幕矩形
+                const labelWidth = 120;
+                const labelHeight = 40;
+                const padding = 5;
+                
+                labelInfo.screenRect.centerX = screenPos.x;
+                labelInfo.screenRect.centerY = screenPos.y;
+                labelInfo.screenRect.left = screenPos.x - labelWidth / 2 - padding;
+                labelInfo.screenRect.right = screenPos.x + labelWidth / 2 + padding;
+                labelInfo.screenRect.top = screenPos.y - labelHeight / 2 - padding;
+                labelInfo.screenRect.bottom = screenPos.y + labelHeight / 2 + padding;
+            }
+        } catch (e) {
+            console.warn('[updateScreenPosition] 错误:', e);
         }
     }
 
-    // 计算标签位置和偏移（根据布局方案）- 增强数值验证
+    // 计算标签位置和偏移（根据布局方案）- 8个方向布局
     function calculateLabelOffset(point, entityId, vehiclePosition, layout) {
         try {
             // 根据entityId生成一个稳定的哈希值，用于计算偏移
@@ -758,28 +1114,45 @@
             
             let offsetX, offsetY, offsetAngle;
             
-            // 确保layout在有效范围内
-            const validLayout = (layout >= 5 && layout <= 8) ? layout : 5;
+            // 8个布局方向：1-东，2-南，3-西，4-北，5-东南，6-东北，7-西南，8-西北
+            // 确保layout在有效范围内（1-8）
+            const validLayout = (layout >= 1 && layout <= 8) ? layout : 5;
             
             switch(validLayout) {
-                case 5: // 布局5: 北偏东（30度）
-                    offsetAngle = Math.PI / 6; // 30度（北偏东）
+                case 1: // 布局1: 东（90度）
+                    offsetAngle = Math.PI / 2; // 90度（东）
                     break;
                     
-                case 6: // 布局6: 南偏东（150度）
-                    offsetAngle = 5 * Math.PI / 6; // 150度（南偏东）
+                case 2: // 布局2: 南（180度）
+                    offsetAngle = Math.PI; // 180度（南）
                     break;
                     
-                case 7: // 布局7: 北偏西（330度）
-                    offsetAngle = -Math.PI / 6; // -30度（330度，北偏西）
+                case 3: // 布局3: 西（270度）
+                    offsetAngle = -Math.PI / 2; // -90度（270度，西）
                     break;
                     
-                case 8: // 布局8: 南偏西（210度）
-                    offsetAngle = -5 * Math.PI / 6; // -150度（210度，南偏西）
+                case 4: // 布局4: 北（0度）
+                    offsetAngle = 0; // 0度（北）
+                    break;
+                    
+                case 5: // 布局5: 东南（135度）
+                    offsetAngle = 3 * Math.PI / 4; // 135度（东南）
+                    break;
+                    
+                case 6: // 布局6: 东北（45度）
+                    offsetAngle = Math.PI / 4; // 45度（东北）
+                    break;
+                    
+                case 7: // 布局7: 西南（225度）
+                    offsetAngle = -3 * Math.PI / 4; // -135度（225度，西南）
+                    break;
+                    
+                case 8: // 布局8: 西北（315度）
+                    offsetAngle = -Math.PI / 4; // -45度（315度，西北）
                     break;
                     
                 default:
-                    offsetAngle = Math.PI / 6; // 默认：北偏东（30度）
+                    offsetAngle = Math.PI / 4; // 默认：东北（45度）
             }
             
             // 计算偏移值
@@ -819,21 +1192,115 @@
             vehiclePosition = entity.position.getValue();
         }
         
-        // 计算标签偏移
-        const { offsetX, offsetY, offsetZ } = calculateLabelOffset(point, entityId, vehiclePosition, currentLabelLayout);
+        // 获取该标签的布局（如果已设置避让布局，使用避让布局；否则使用默认布局）
+        let labelLayout = entityLayouts.get(entityId);
+        if (!labelLayout) {
+            labelLayout = currentLabelLayout;
+            entityLayouts.set(entityId, labelLayout);
+        }
         
-        // 更新标签的eyeOffset
-        entity.label.eyeOffset = new Cesium.Cartesian3(offsetX, offsetY, offsetZ);
+        // 计算标签偏移（基础偏移，避让算法会在此基础上调整）
+        const { offsetX, offsetY, offsetZ } = calculateLabelOffset(point, entityId, vehiclePosition, labelLayout);
         
-        // 计算标签的实际世界坐标位置
+        // 获取当前的eyeOffset（如果存在，可能是避让算法调整后的值）
+        let currentEyeOffset = entity.label.eyeOffset;
+        if (currentEyeOffset instanceof Cesium.Cartesian3) {
+            currentEyeOffset = Cesium.Cartesian3.clone(currentEyeOffset);
+        } else if (currentEyeOffset && currentEyeOffset.getValue) {
+            currentEyeOffset = Cesium.Cartesian3.clone(currentEyeOffset.getValue());
+        } else {
+            currentEyeOffset = null;
+        }
+        
+        // 计算基础偏移的世界坐标
         const cartographic = Cesium.Cartographic.fromCartesian(vehiclePosition);
         const latOffsetRadians = offsetY / 6378137;
         const lonOffsetRadians = offsetX / (6378137 * Math.cos(cartographic.latitude));
-        const labelWorldPosition = Cesium.Cartesian3.fromRadians(
+        const baseLabelWorldPos = Cesium.Cartesian3.fromRadians(
             cartographic.longitude + lonOffsetRadians,
             cartographic.latitude + latOffsetRadians,
             cartographic.height + offsetZ
         );
+        
+        // 如果当前eyeOffset存在，计算其对应的世界位置
+        let currentLabelWorldPos = baseLabelWorldPos;
+        if (currentEyeOffset) {
+            const camera = viewer.camera;
+            const worldOffset = new Cesium.Cartesian3(
+                camera.right.x * currentEyeOffset.x + camera.up.x * currentEyeOffset.y + camera.direction.x * currentEyeOffset.z,
+                camera.right.y * currentEyeOffset.x + camera.up.y * currentEyeOffset.y + camera.direction.y * currentEyeOffset.z,
+                camera.right.z * currentEyeOffset.x + camera.up.z * currentEyeOffset.y + camera.direction.z * currentEyeOffset.z
+            );
+            currentLabelWorldPos = Cesium.Cartesian3.add(vehiclePosition, worldOffset, new Cesium.Cartesian3());
+        }
+        
+        // 关键修复：检查该标签是否有避让布局（entityLayouts中有记录）
+        // 如果有避让布局，说明避让算法已经设置了eyeOffset，应该保留它
+        const hasAvoidanceLayout = entityLayouts.has(entityId);
+        const savedLayout = entityLayouts.get(entityId);
+        
+        if (hasAvoidanceLayout && savedLayout && savedLayout !== currentLabelLayout) {
+            // 该标签有避让布局，且与默认布局不同，说明是避让算法设置的
+            // 检查当前eyeOffset是否与避让布局计算出的偏移一致
+            const { offsetX: savedOffsetX, offsetY: savedOffsetY, offsetZ: savedOffsetZ } = 
+                calculateLabelOffset(point, entityId, vehiclePosition, savedLayout);
+            
+            // 计算当前eyeOffset与避让布局计算出的偏移的差异
+            if (currentEyeOffset && Cesium.defined(currentEyeOffset) &&
+                !isNaN(currentEyeOffset.x) && !isNaN(currentEyeOffset.y) && !isNaN(currentEyeOffset.z) &&
+                isFinite(currentEyeOffset.x) && isFinite(currentEyeOffset.y) && isFinite(currentEyeOffset.z)) {
+                
+                const savedEyeOffset = new Cesium.Cartesian3(savedOffsetX, savedOffsetY, savedOffsetZ);
+                const diffX = Math.abs(currentEyeOffset.x - savedEyeOffset.x);
+                const diffY = Math.abs(currentEyeOffset.y - savedEyeOffset.y);
+                const diffZ = Math.abs(currentEyeOffset.z - savedEyeOffset.z);
+                const diffMagnitude = Math.sqrt(diffX * diffX + diffY * diffY + diffZ * diffZ);
+                
+                // 如果差异很小（小于10米），说明eyeOffset已经正确，保留它
+                // 如果差异很大，说明可能被其他地方修改了，重新设置为避让布局的偏移
+                if (diffMagnitude < 10) {
+                    // eyeOffset已经正确，保留它
+                    // 不重置
+                } else {
+                    // eyeOffset被修改了，重新设置为避让布局的偏移
+                    entity.label.eyeOffset = savedEyeOffset;
+                }
+            } else {
+                // 当前eyeOffset无效，设置为避让布局的偏移
+                entity.label.eyeOffset = new Cesium.Cartesian3(savedOffsetX, savedOffsetY, savedOffsetZ);
+            }
+        } else {
+            // 没有避让布局，使用正常的逻辑
+            if (currentEyeOffset && Cesium.defined(currentEyeOffset) &&
+                !isNaN(currentEyeOffset.x) && !isNaN(currentEyeOffset.y) && !isNaN(currentEyeOffset.z) &&
+                isFinite(currentEyeOffset.x) && isFinite(currentEyeOffset.y) && isFinite(currentEyeOffset.z)) {
+                
+                // 计算基础偏移和当前偏移的差异
+                const offsetDiff = Cesium.Cartesian3.subtract(baseLabelWorldPos, currentLabelWorldPos, new Cesium.Cartesian3());
+                const offsetDiffLength = Cesium.Cartesian3.magnitude(offsetDiff);
+                
+                // 如果差异很小（小于50米），说明可能是车辆位置变化导致的，重置为基础偏移
+                // 如果差异很大（超过50米），说明可能是避让算法设置的，保留它
+                if (offsetDiffLength < 50) {
+                    // 差异很小，重置为基础偏移
+                    entity.label.eyeOffset = new Cesium.Cartesian3(offsetX, offsetY, offsetZ);
+                }
+                // 否则保持当前的eyeOffset，不重置
+            } else {
+                // 当前eyeOffset无效，重置为基础偏移
+                entity.label.eyeOffset = new Cesium.Cartesian3(offsetX, offsetY, offsetZ);
+            }
+        }
+        
+        // 计算标签的实际世界坐标位置（使用当前的eyeOffset，而不是基础偏移）
+        const finalEyeOffset = entity.label.eyeOffset;
+        const camera = viewer.camera;
+        const finalWorldOffset = new Cesium.Cartesian3(
+            camera.right.x * finalEyeOffset.x + camera.up.x * finalEyeOffset.y + camera.direction.x * finalEyeOffset.z,
+            camera.right.y * finalEyeOffset.x + camera.up.y * finalEyeOffset.y + camera.direction.y * finalEyeOffset.z,
+            camera.right.z * finalEyeOffset.x + camera.up.z * finalEyeOffset.y + camera.direction.z * finalEyeOffset.z
+        );
+        const labelWorldPosition = Cesium.Cartesian3.add(vehiclePosition, finalWorldOffset, new Cesium.Cartesian3());
         
         // 更新或创建连接线（全面修复 + 调试）
         // 使用闭包保存point和entityId，避免在CallbackProperty中访问可能变化的值
@@ -894,8 +1361,48 @@
                         return [savedVehiclePosition, savedLabelWorldPosition];
                     }
                     
-                    // 策略2：直接使用savedLabelWorldPosition（调整到当前车辆位置）
-                    // 这样可以保证所有引导线都能显示，因为savedLabelWorldPosition是在updateLabelPosition时正确计算的
+                    // 关键修复：直接使用当前的eyeOffset计算标签位置，而不是使用savedLabelWorldPosition
+                    // 这样可以确保避让算法切换布局后，引导线能正确显示
+                    if (entity.label && entity.label.eyeOffset) {
+                        try {
+                            // 获取当前的eyeOffset（可能是避让算法调整后的值）
+                            let currentEyeOffset = entity.label.eyeOffset;
+                            if (currentEyeOffset instanceof Cesium.Cartesian3) {
+                                currentEyeOffset = Cesium.Cartesian3.clone(currentEyeOffset);
+                            } else if (currentEyeOffset && currentEyeOffset.getValue) {
+                                currentEyeOffset = Cesium.Cartesian3.clone(currentEyeOffset.getValue());
+                            } else {
+                                currentEyeOffset = null;
+                            }
+                            
+                            if (currentEyeOffset && Cesium.defined(currentEyeOffset) &&
+                                !isNaN(currentEyeOffset.x) && !isNaN(currentEyeOffset.y) && !isNaN(currentEyeOffset.z) &&
+                                isFinite(currentEyeOffset.x) && isFinite(currentEyeOffset.y) && isFinite(currentEyeOffset.z)) {
+                                
+                                // 将eyeOffset转换为世界坐标偏移
+                                const camera = viewer.camera;
+                                const worldOffset = new Cesium.Cartesian3(
+                                    camera.right.x * currentEyeOffset.x + camera.up.x * currentEyeOffset.y + camera.direction.x * currentEyeOffset.z,
+                                    camera.right.y * currentEyeOffset.x + camera.up.y * currentEyeOffset.y + camera.direction.y * currentEyeOffset.z,
+                                    camera.right.z * currentEyeOffset.x + camera.up.z * currentEyeOffset.y + camera.direction.z * currentEyeOffset.z
+                                );
+                                
+                                // 计算标签的实际世界坐标位置
+                                const labelWorldPos = Cesium.Cartesian3.add(currentPos, worldOffset, new Cesium.Cartesian3());
+                                
+                                // 验证labelPos
+                                if (labelWorldPos && Cesium.defined(labelWorldPos) &&
+                                    !isNaN(labelWorldPos.x) && !isNaN(labelWorldPos.y) && !isNaN(labelWorldPos.z) &&
+                                    isFinite(labelWorldPos.x) && isFinite(labelWorldPos.y) && isFinite(labelWorldPos.z)) {
+                                    return [currentPos, labelWorldPos];
+                                }
+                            }
+                        } catch (e) {
+                            if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: eyeOffset计算失败`, e);
+                        }
+                    }
+                    
+                    // Fallback：使用savedLabelWorldPosition（调整到当前车辆位置）
                     if (savedLabelWorldPosition && Cesium.defined(savedLabelWorldPosition) &&
                         !isNaN(savedLabelWorldPosition.x) && !isNaN(savedLabelWorldPosition.y) && !isNaN(savedLabelWorldPosition.z) &&
                         isFinite(savedLabelWorldPosition.x) && isFinite(savedLabelWorldPosition.y) && isFinite(savedLabelWorldPosition.z)) {
@@ -912,8 +1419,8 @@
                         }
                     }
                     
-                    // 如果savedLabelWorldPosition无效，使用保存的值作为fallback
-                    if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: savedLabelWorldPosition无效，使用fallback`);
+                    // 最后的fallback
+                    if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: 所有方法都失败，使用fallback`);
                     return [savedVehiclePosition, savedLabelWorldPosition];
                 } catch (e) {
                     console.error(`[引导线错误] ${savedEntityId}: 未捕获的异常`, e);
