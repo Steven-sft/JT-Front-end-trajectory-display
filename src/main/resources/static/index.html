@@ -32,14 +32,14 @@
         <div class="control-group">
             <label>标签布局方案:</label>
             <select id="labelLayout">
-                <option value="1">布局1: 东（90度，300-500m）</option>
-                <option value="2">布局2: 南（180度，300-500m）</option>
-                <option value="3">布局3: 西（270度，300-500m）</option>
-                <option value="4">布局4: 北（0度，300-500m）</option>
-                <option value="5">布局5: 东南（135度，300-500m）</option>
-                <option value="6" selected>布局6: 东北（45度，300-500m）</option>
-                <option value="7">布局7: 西南（225度，300-500m）</option>
-                <option value="8">布局8: 西北（315度，300-500m）</option>
+                <option value="1">布局1: 东（90度，200-300m）</option>
+                <option value="2">布局2: 南（180度，200-300m）</option>
+                <option value="3">布局3: 西（270度，200-300m）</option>
+                <option value="4">布局4: 北（0度，200-300m）</option>
+                <option value="5">布局5: 东南（135度，200-300m）</option>
+                <option value="6" selected>布局6: 东北（45度，200-300m）</option>
+                <option value="7">布局7: 西南（225度，200-300m）</option>
+                <option value="8">布局8: 西北（315度，200-300m）</option>
             </select>
         </div>
     </div>
@@ -653,8 +653,10 @@
                 console.log(`[避让算法] 检测到 ${labelInfos.length} 个标签`);
             }
             
-            // 存储需要避让的标签（允许多个标签同时避让，实现更松散的分布）
+            // 存储需要避让的标签（修改：每对重叠标签中，只让一个避让）
             const labelsToAvoid = new Set();
+            // 存储固定不变的标签（每对重叠标签中，ID较小的保持固定）
+            const fixedLabels = new Set();
             // 存储每个标签的重叠信息，用于更智能的避让决策
             const overlapInfo = new Map(); // entityId -> { overlaps: Set<entityId>, minDistance: number }
             
@@ -690,25 +692,25 @@
                         overlapInfo.get(key1).minDistance = Math.min(overlapInfo.get(key1).minDistance, distance);
                         overlapInfo.get(key2).minDistance = Math.min(overlapInfo.get(key2).minDistance, distance);
                         
-                        // 如果距离太近，两个标签都需要避让（实现更松散的分布）
-                        if (distance < minSeparation) {
-                            labelsToAvoid.add(key1);
-                            labelsToAvoid.add(key2);
-                        } else if (isRectOverlap(info1.screenRect, info2.screenRect)) {
-                            // 如果只是重叠但距离较远，只让其中一个避让（选择重叠更多的）
-                            const overlapCount1 = overlapInfo.get(key1).overlaps.size;
-                            const overlapCount2 = overlapInfo.get(key2).overlaps.size;
-                            if (overlapCount1 > overlapCount2) {
-                                labelsToAvoid.add(key1);
-                            } else if (overlapCount2 > overlapCount1) {
-                                labelsToAvoid.add(key2);
-                            } else {
-                                // 重叠数量相同，选择ID较小的
-                                const avoidEntityId = key1 < key2 ? key1 : key2;
-                                labelsToAvoid.add(avoidEntityId);
-                            }
+                        // 修改：重叠的两个标签中，固定一个不变，只让另一个避让
+                        // 策略：选择ID较大的标签进行避让，ID较小的标签保持不变
+                        // 这样可以确保每对重叠标签中，总是有一个保持稳定
+                        // 选择ID较大的标签进行避让，ID较小的保持不变
+                        const avoidEntityId = key1 > key2 ? key1 : key2;
+                        const fixedEntityId = key1 > key2 ? key2 : key1;
+                        
+                        // 标记固定标签（如果该标签已经在避让列表中，需要移除）
+                        fixedLabels.add(fixedEntityId);
+                        if (labelsToAvoid.has(fixedEntityId)) {
+                            labelsToAvoid.delete(fixedEntityId);
                         }
                         
+                        // 只让ID较大的标签避让（但如果它已经被标记为固定，则跳过）
+                        if (!fixedLabels.has(avoidEntityId)) {
+                            labelsToAvoid.add(avoidEntityId);
+                        }
+                        
+                        console.log(`[避让决策] 标签 ${fixedEntityId} 保持固定，标签 ${avoidEntityId} 进行避让`);
                         // 调试：输出重叠信息
                         console.log(`[避让检测] 标签 ${key1} 和 ${key2} 重叠/过近，距离 ${distance.toFixed(1)} 像素`);
                     }
@@ -891,7 +893,7 @@
                                     
                                     // 强制触发引导线更新（多重方式确保更新）
                                     // 关键：避让算法修改eyeOffset后，必须立即更新引导线，确保引导线能正确显示
-                                    const point = latestPoints.get(entityId);
+                                    // 注意：point 已经在上面定义了（第765行），这里直接使用
                                     if (point) {
                                         // 方式1：立即调用updateLabelPosition来更新引导线
                                         // updateLabelPosition中有逻辑保护避让布局的eyeOffset，所以可以安全调用
@@ -1107,52 +1109,54 @@
                 }
             }
             
-            // 增加偏移距离到300-500m，避免标签太近
-            const offsetDistance = 300 + (Math.abs(hash) % 201); // 300-500m
+            // 增加偏移距离到200-300m，避免标签太近
+            const offsetDistance = 200 + (Math.abs(hash) % 101); // 200-300m
             // 增加高度变化范围，避免标签和引导线重合
             const offsetZ = (Math.abs(hash) % 101) - 50; // -50到50米，更大的高度变化
             
             let offsetX, offsetY, offsetAngle;
             
             // 8个布局方向：1-东，2-南，3-西，4-北，5-东南，6-东北，7-西南，8-西北
+            // 所有方向统一偏转30度（30度 = Math.PI / 6）
             // 确保layout在有效范围内（1-8）
             const validLayout = (layout >= 1 && layout <= 8) ? layout : 5;
+            const rotationOffset = Math.PI / 6; // 30度偏转
             
             switch(validLayout) {
-                case 1: // 布局1: 东（90度）
-                    offsetAngle = Math.PI / 2; // 90度（东）
+                case 1: // 布局1: 东（90度 + 30度 = 120度）
+                    offsetAngle = Math.PI / 2 + rotationOffset; // 90度 + 30度 = 120度
                     break;
                     
-                case 2: // 布局2: 南（180度）
-                    offsetAngle = Math.PI; // 180度（南）
+                case 2: // 布局2: 南（180度 + 30度 = 210度）
+                    offsetAngle = Math.PI + rotationOffset; // 180度 + 30度 = 210度
                     break;
                     
-                case 3: // 布局3: 西（270度）
-                    offsetAngle = -Math.PI / 2; // -90度（270度，西）
+                case 3: // 布局3: 西（270度 + 30度 = 300度）
+                    offsetAngle = -Math.PI / 2 + rotationOffset; // -90度 + 30度 = -60度（300度）
                     break;
                     
-                case 4: // 布局4: 北（0度）
-                    offsetAngle = 0; // 0度（北）
+                case 4: // 布局4: 北（0度 + 30度 = 30度）
+                    offsetAngle = 0 + rotationOffset; // 0度 + 30度 = 30度
                     break;
                     
-                case 5: // 布局5: 东南（135度）
-                    offsetAngle = 3 * Math.PI / 4; // 135度（东南）
+                case 5: // 布局5: 东南（135度 + 30度 = 165度）
+                    offsetAngle = 3 * Math.PI / 4 + rotationOffset; // 135度 + 30度 = 165度
                     break;
                     
-                case 6: // 布局6: 东北（45度）
-                    offsetAngle = Math.PI / 4; // 45度（东北）
+                case 6: // 布局6: 东北（45度 + 30度 = 75度）
+                    offsetAngle = Math.PI / 4 + rotationOffset; // 45度 + 30度 = 75度
                     break;
                     
-                case 7: // 布局7: 西南（225度）
-                    offsetAngle = -3 * Math.PI / 4; // -135度（225度，西南）
+                case 7: // 布局7: 西南（225度 + 30度 = 255度）
+                    offsetAngle = -3 * Math.PI / 4 + rotationOffset; // -135度 + 30度 = -105度（255度）
                     break;
                     
-                case 8: // 布局8: 西北（315度）
-                    offsetAngle = -Math.PI / 4; // -45度（315度，西北）
+                case 8: // 布局8: 西北（315度 + 30度 = 345度）
+                    offsetAngle = -Math.PI / 4 + rotationOffset; // -45度 + 30度 = -15度（345度）
                     break;
                     
                 default:
-                    offsetAngle = Math.PI / 4; // 默认：东北（45度）
+                    offsetAngle = Math.PI / 4 + rotationOffset; // 默认：东北（45度 + 30度 = 75度）
             }
             
             // 计算偏移值
@@ -1167,7 +1171,7 @@
                     offsetX, offsetY, offsetZ, offsetDistance, offsetAngle, layout
                 });
                 // 返回安全的默认值（确保距离足够，引导线可见）
-                return { offsetX: 300, offsetY: -300, offsetZ: 50 };
+                return { offsetX: 200, offsetY: -200, offsetZ: 50 };
             }
             
             // 修复5：验证偏移距离是否足够（至少100米，确保引导线可见）
@@ -1182,7 +1186,7 @@
         } catch (e) {
             console.error(`[calculateLabelOffset] ${entityId}: 计算错误`, e);
             // 返回安全的默认值（确保距离足够，引导线可见）
-            return { offsetX: 300, offsetY: -300, offsetZ: 50 };
+            return { offsetX: 200, offsetY: -200, offsetZ: 50 };
         }
     }
     
@@ -1304,10 +1308,11 @@
         
         // 更新或创建连接线（全面修复 + 调试）
         // 使用闭包保存point和entityId，避免在CallbackProperty中访问可能变化的值
+        // 关键：不保存savedLabelWorldPosition，而是每次在CallbackProperty中动态计算，确保使用最新的eyeOffset
         const savedPoint = point;
         const savedEntityId = entityId;
         const savedVehiclePosition = vehiclePosition;
-        const savedLabelWorldPosition = labelWorldPosition;
+        // 注意：不再保存savedLabelWorldPosition，而是在CallbackProperty中动态计算
         
         // 调试计数器，用于追踪特定车辆的引导线
         const debugCounter = { count: 0 };
@@ -1318,24 +1323,67 @@
                 // 每100次调用输出一次调试信息（避免刷屏）
                 const shouldDebug = debugCounter.count % 100 === 0;
                 
+                // 关键修复：不依赖闭包捕获的entity，而是通过vehicleEntities Map获取最新的entity
+                // 这样可以确保每次都能访问到最新的eyeOffset（包括避让算法修改后的值）
+                let currentEntity = vehicleEntities.get(savedEntityId);
+                if (!currentEntity) {
+                    // 如果从Map中获取不到，尝试使用闭包捕获的entity（向后兼容）
+                    currentEntity = entity;
+                }
+                
+                // 关键：确保总是返回有效的坐标数组，即使计算失败也要返回一个基本的引导线
+                
                 try {
                     // 获取当前实体位置
-                    if (!entity || !entity.position) {
+                    if (!currentEntity || !currentEntity.position) {
                         if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: entity或position不存在`);
-                        return [savedVehiclePosition, savedLabelWorldPosition];
+                        // 使用简单的fallback：计算一个默认偏移位置
+                        try {
+                            const cart = Cesium.Cartographic.fromCartesian(savedVehiclePosition);
+                            const fallbackPos = Cesium.Cartesian3.fromRadians(
+                                cart.longitude + 200 / (6378137 * Math.cos(cart.latitude)),
+                                cart.latitude + 200 / 6378137,
+                                (cart.height || 0) + 50
+                            );
+                            return [savedVehiclePosition, fallbackPos];
+                        } catch (e) {
+                            return [savedVehiclePosition, savedVehiclePosition]; // 最后的fallback
+                        }
                     }
                     
                     let currentPos;
                     try {
-                        currentPos = entity.position.getValue();
+                        currentPos = currentEntity.position.getValue();
                     } catch (e) {
                         if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: 获取position失败`, e);
-                        return [savedVehiclePosition, savedLabelWorldPosition];
+                        // 使用简单的fallback
+                        try {
+                            const cart = Cesium.Cartographic.fromCartesian(savedVehiclePosition);
+                            const fallbackPos = Cesium.Cartesian3.fromRadians(
+                                cart.longitude + 200 / (6378137 * Math.cos(cart.latitude)),
+                                cart.latitude + 200 / 6378137,
+                                (cart.height || 0) + 50
+                            );
+                            return [savedVehiclePosition, fallbackPos];
+                        } catch (e2) {
+                            return [savedVehiclePosition, savedVehiclePosition];
+                        }
                     }
                     
                     if (!currentPos || !Cesium.defined(currentPos)) {
                         if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: currentPos未定义`);
-                        return [savedVehiclePosition, savedLabelWorldPosition];
+                        // 使用简单的fallback
+                        try {
+                            const cart = Cesium.Cartographic.fromCartesian(savedVehiclePosition);
+                            const fallbackPos = Cesium.Cartesian3.fromRadians(
+                                cart.longitude + 200 / (6378137 * Math.cos(cart.latitude)),
+                                cart.latitude + 200 / 6378137,
+                                (cart.height || 0) + 50
+                            );
+                            return [savedVehiclePosition, fallbackPos];
+                        } catch (e) {
+                            return [savedVehiclePosition, savedVehiclePosition];
+                        }
                     }
                     
                     // 验证currentPos
@@ -1343,7 +1391,18 @@
                         isNaN(currentPos.x) || isNaN(currentPos.y) || isNaN(currentPos.z) ||
                         !isFinite(currentPos.x) || !isFinite(currentPos.y) || !isFinite(currentPos.z)) {
                         if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: currentPos包含无效值`, currentPos);
-                        return [savedVehiclePosition, savedLabelWorldPosition];
+                        // 使用简单的fallback
+                        try {
+                            const cart = Cesium.Cartographic.fromCartesian(savedVehiclePosition);
+                            const fallbackPos = Cesium.Cartesian3.fromRadians(
+                                cart.longitude + 200 / (6378137 * Math.cos(cart.latitude)),
+                                cart.latitude + 200 / 6378137,
+                                (cart.height || 0) + 50
+                            );
+                            return [savedVehiclePosition, fallbackPos];
+                        } catch (e) {
+                            return [savedVehiclePosition, savedVehiclePosition];
+                        }
                     }
                     
                     // 转换为地理坐标
@@ -1352,21 +1411,46 @@
                         cart = Cesium.Cartographic.fromCartesian(currentPos);
                     } catch (e) {
                         if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: 坐标转换失败`, e);
-                        return [savedVehiclePosition, savedLabelWorldPosition];
+                        // 使用简单的fallback
+                        try {
+                            const cart2 = Cesium.Cartographic.fromCartesian(savedVehiclePosition);
+                            const fallbackPos = Cesium.Cartesian3.fromRadians(
+                                cart2.longitude + 200 / (6378137 * Math.cos(cart2.latitude)),
+                                cart2.latitude + 200 / 6378137,
+                                (cart2.height || 0) + 50
+                            );
+                            return [savedVehiclePosition, fallbackPos];
+                        } catch (e2) {
+                            return [savedVehiclePosition, savedVehiclePosition];
+                        }
                     }
                     
                     if (!cart || isNaN(cart.longitude) || isNaN(cart.latitude) || 
                         !isFinite(cart.longitude) || !isFinite(cart.latitude)) {
                         if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: cart包含无效值`, cart);
-                        return [savedVehiclePosition, savedLabelWorldPosition];
+                        // 使用简单的fallback
+                        try {
+                            const cart2 = Cesium.Cartographic.fromCartesian(savedVehiclePosition);
+                            const fallbackPos = Cesium.Cartesian3.fromRadians(
+                                cart2.longitude + 200 / (6378137 * Math.cos(cart2.latitude)),
+                                cart2.latitude + 200 / 6378137,
+                                (cart2.height || 0) + 50
+                            );
+                            return [savedVehiclePosition, fallbackPos];
+                        } catch (e) {
+                            return [savedVehiclePosition, savedVehiclePosition];
+                        }
                     }
                     
-                    // 关键修复：直接使用当前的eyeOffset计算标签位置，而不是使用savedLabelWorldPosition
-                    // 这样可以确保避让算法切换布局后，引导线能正确显示
-                    if (entity.label && entity.label.eyeOffset) {
+                    // 关键修复：始终使用最新的eyeOffset计算标签位置
+                    // 策略1：优先使用当前的eyeOffset（可能是避让算法调整后的值）
+                    let labelWorldPos = null;
+                    
+                    // 关键：使用currentEntity而不是闭包捕获的entity，确保获取到最新的eyeOffset
+                    if (currentEntity.label && currentEntity.label.eyeOffset) {
                         try {
                             // 获取当前的eyeOffset（可能是避让算法调整后的值）
-                            let currentEyeOffset = entity.label.eyeOffset;
+                            let currentEyeOffset = currentEntity.label.eyeOffset;
                             if (currentEyeOffset instanceof Cesium.Cartesian3) {
                                 currentEyeOffset = Cesium.Cartesian3.clone(currentEyeOffset);
                             } else if (currentEyeOffset && currentEyeOffset.getValue) {
@@ -1388,13 +1472,45 @@
                                 );
                                 
                                 // 计算标签的实际世界坐标位置
-                                const labelWorldPos = Cesium.Cartesian3.add(currentPos, worldOffset, new Cesium.Cartesian3());
+                                labelWorldPos = Cesium.Cartesian3.add(currentPos, worldOffset, new Cesium.Cartesian3());
                                 
-                                // 验证labelPos
+                                // 验证labelPos并确保高度合理（避免被地形裁剪）
                                 if (labelWorldPos && Cesium.defined(labelWorldPos) &&
                                     !isNaN(labelWorldPos.x) && !isNaN(labelWorldPos.y) && !isNaN(labelWorldPos.z) &&
                                     isFinite(labelWorldPos.x) && isFinite(labelWorldPos.y) && isFinite(labelWorldPos.z)) {
-                                    return [currentPos, labelWorldPos];
+                                    // 确保起点和终点都在合理的高度（至少在地面上方）
+                                    let startPos = currentPos;
+                                    let endPos = labelWorldPos;
+                                    
+                                    // 如果起点高度过低，稍微抬高
+                                    try {
+                                        const startCart = Cesium.Cartographic.fromCartesian(startPos);
+                                        if (startCart.height < 0) {
+                                            startPos = Cesium.Cartesian3.fromRadians(
+                                                startCart.longitude,
+                                                startCart.latitude,
+                                                Math.max(0, startCart.height) + 1.0
+                                            );
+                                        }
+                                    } catch (e) {
+                                        // 忽略错误
+                                    }
+                                    
+                                    // 如果终点高度过低，稍微抬高
+                                    try {
+                                        const endCart = Cesium.Cartographic.fromCartesian(endPos);
+                                        if (endCart.height < 0) {
+                                            endPos = Cesium.Cartesian3.fromRadians(
+                                                endCart.longitude,
+                                                endCart.latitude,
+                                                Math.max(0, endCart.height) + 1.0
+                                            );
+                                        }
+                                    } catch (e) {
+                                        // 忽略错误
+                                    }
+                                    
+                                    return [startPos, endPos];
                                 }
                             }
                         } catch (e) {
@@ -1402,29 +1518,247 @@
                         }
                     }
                     
-                    // Fallback：使用savedLabelWorldPosition（调整到当前车辆位置）
-                    if (savedLabelWorldPosition && Cesium.defined(savedLabelWorldPosition) &&
-                        !isNaN(savedLabelWorldPosition.x) && !isNaN(savedLabelWorldPosition.y) && !isNaN(savedLabelWorldPosition.z) &&
-                        isFinite(savedLabelWorldPosition.x) && isFinite(savedLabelWorldPosition.y) && isFinite(savedLabelWorldPosition.z)) {
-                        // 计算标签位置相对于保存的车辆位置的偏移向量
-                        const offsetVector = Cesium.Cartesian3.subtract(savedLabelWorldPosition, savedVehiclePosition, new Cesium.Cartesian3());
-                        // 将偏移向量应用到当前车辆位置，得到调整后的标签位置
-                        const adjustedLabelPos = Cesium.Cartesian3.add(currentPos, offsetVector, new Cesium.Cartesian3());
+                    // 策略2：如果eyeOffset无效，使用布局方案重新计算标签位置
+                    // 这样可以确保即使eyeOffset无效，引导线也能显示
+                    try {
+                        // 获取当前布局（优先使用避让布局，否则使用默认布局）
+                        let layout = entityLayouts.get(savedEntityId);
+                        if (!layout) {
+                            layout = currentLabelLayout;
+                        }
                         
-                        // 验证调整后的labelPos
-                        if (adjustedLabelPos && Cesium.defined(adjustedLabelPos) &&
-                            !isNaN(adjustedLabelPos.x) && !isNaN(adjustedLabelPos.y) && !isNaN(adjustedLabelPos.z) &&
-                            isFinite(adjustedLabelPos.x) && isFinite(adjustedLabelPos.y) && isFinite(adjustedLabelPos.z)) {
-                            return [currentPos, adjustedLabelPos];
+                        // 使用布局方案重新计算标签位置
+                        const { offsetX, offsetY, offsetZ } = calculateLabelOffset(savedPoint, savedEntityId, currentPos, layout);
+                        
+                        // 验证计算结果
+                        if (!isNaN(offsetX) && !isNaN(offsetY) && !isNaN(offsetZ) &&
+                            isFinite(offsetX) && isFinite(offsetY) && isFinite(offsetZ)) {
+                            
+                            // 转换为地理坐标
+                            const latOffsetRadians = offsetY / 6378137;
+                            const lonOffsetRadians = offsetX / (6378137 * Math.cos(cart.latitude));
+                            
+                            // 计算标签的世界坐标位置
+                            labelWorldPos = Cesium.Cartesian3.fromRadians(
+                                cart.longitude + lonOffsetRadians,
+                                cart.latitude + latOffsetRadians,
+                                (cart.height || 0) + offsetZ
+                            );
+                            
+                            // 验证labelPos并确保高度合理（避免被地形裁剪）
+                            if (labelWorldPos && Cesium.defined(labelWorldPos) &&
+                                !isNaN(labelWorldPos.x) && !isNaN(labelWorldPos.y) && !isNaN(labelWorldPos.z) &&
+                                isFinite(labelWorldPos.x) && isFinite(labelWorldPos.y) && isFinite(labelWorldPos.z)) {
+                                // 确保起点和终点都在合理的高度（至少在地面上方）
+                                let startPos = currentPos;
+                                let endPos = labelWorldPos;
+                                
+                                // 如果起点高度过低，稍微抬高
+                                try {
+                                    const startCart = Cesium.Cartographic.fromCartesian(startPos);
+                                    if (startCart.height < 0) {
+                                        startPos = Cesium.Cartesian3.fromRadians(
+                                            startCart.longitude,
+                                            startCart.latitude,
+                                            Math.max(0, startCart.height) + 1.0
+                                        );
+                                    }
+                                } catch (e) {
+                                    // 忽略错误
+                                }
+                                
+                                // 如果终点高度过低，稍微抬高
+                                try {
+                                    const endCart = Cesium.Cartographic.fromCartesian(endPos);
+                                    if (endCart.height < 0) {
+                                        endPos = Cesium.Cartesian3.fromRadians(
+                                            endCart.longitude,
+                                            endCart.latitude,
+                                            Math.max(0, endCart.height) + 1.0
+                                        );
+                                    }
+                                } catch (e) {
+                                    // 忽略错误
+                                }
+                                
+                                return [startPos, endPos];
+                            }
+                        }
+                    } catch (e) {
+                        if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: 布局计算失败`, e);
+                    }
+                    
+                    // 策略3：最后的fallback - 使用默认布局计算标签位置
+                    // 确保即使所有方法都失败，也能显示引导线
+                    try {
+                        // 使用默认布局（布局6：东北方向）
+                        const defaultLayout = currentLabelLayout;
+                        const { offsetX, offsetY, offsetZ } = calculateLabelOffset(savedPoint, savedEntityId, currentPos, defaultLayout);
+                        
+                        if (!isNaN(offsetX) && !isNaN(offsetY) && !isNaN(offsetZ) &&
+                            isFinite(offsetX) && isFinite(offsetY) && isFinite(offsetZ)) {
+                            
+                            const latOffsetRadians = offsetY / 6378137;
+                            const lonOffsetRadians = offsetX / (6378137 * Math.cos(cart.latitude));
+                            
+                            labelWorldPos = Cesium.Cartesian3.fromRadians(
+                                cart.longitude + lonOffsetRadians,
+                                cart.latitude + latOffsetRadians,
+                                (cart.height || 0) + offsetZ
+                            );
+                            
+                            // 验证labelPos并确保高度合理（避免被地形裁剪）
+                            if (labelWorldPos && Cesium.defined(labelWorldPos) &&
+                                !isNaN(labelWorldPos.x) && !isNaN(labelWorldPos.y) && !isNaN(labelWorldPos.z) &&
+                                isFinite(labelWorldPos.x) && isFinite(labelWorldPos.y) && isFinite(labelWorldPos.z)) {
+                                // 确保起点和终点都在合理的高度（至少在地面上方）
+                                let startPos = currentPos;
+                                let endPos = labelWorldPos;
+                                
+                                // 如果起点高度过低，稍微抬高
+                                try {
+                                    const startCart = Cesium.Cartographic.fromCartesian(startPos);
+                                    if (startCart.height < 0) {
+                                        startPos = Cesium.Cartesian3.fromRadians(
+                                            startCart.longitude,
+                                            startCart.latitude,
+                                            Math.max(0, startCart.height) + 1.0
+                                        );
+                                    }
+                                } catch (e) {
+                                    // 忽略错误
+                                }
+                                
+                                // 如果终点高度过低，稍微抬高
+                                try {
+                                    const endCart = Cesium.Cartographic.fromCartesian(endPos);
+                                    if (endCart.height < 0) {
+                                        endPos = Cesium.Cartesian3.fromRadians(
+                                            endCart.longitude,
+                                            endCart.latitude,
+                                            Math.max(0, endCart.height) + 1.0
+                                        );
+                                    }
+                                } catch (e) {
+                                    // 忽略错误
+                                }
+                                
+                                return [startPos, endPos];
+                            }
+                        }
+                    } catch (e) {
+                        if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: 默认布局计算失败`, e);
+                    }
+                    
+                    // 最后的fallback：返回一个简单的偏移位置（确保引导线至少能显示）
+                    if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: 所有方法都失败，使用简单fallback`);
+                    // 使用一个简单的偏移（东北方向，300米）
+                    // 确保cart已定义，如果未定义则使用currentPos重新计算
+                    let finalCart = cart;
+                    if (!finalCart || isNaN(finalCart.longitude) || isNaN(finalCart.latitude)) {
+                        try {
+                            finalCart = Cesium.Cartographic.fromCartesian(currentPos);
+                        } catch (e) {
+                            // 如果还是失败，使用savedVehiclePosition
+                            try {
+                                finalCart = Cesium.Cartographic.fromCartesian(savedVehiclePosition);
+                            } catch (e2) {
+                                // 最后的fallback：返回相同位置（至少不会报错）
+                                return [currentPos, currentPos];
+                            }
                         }
                     }
                     
-                    // 最后的fallback
-                    if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: 所有方法都失败，使用fallback`);
-                    return [savedVehiclePosition, savedLabelWorldPosition];
+                    if (finalCart && !isNaN(finalCart.longitude) && !isNaN(finalCart.latitude)) {
+                        const simpleOffset = Cesium.Cartesian3.fromRadians(
+                            finalCart.longitude + 200 / (6378137 * Math.cos(finalCart.latitude)),
+                            finalCart.latitude + 200 / 6378137,
+                            (finalCart.height || 0) + 50
+                        );
+                        // 验证simpleOffset并确保高度合理（避免被地形裁剪）
+                        if (simpleOffset && Cesium.defined(simpleOffset) &&
+                            !isNaN(simpleOffset.x) && !isNaN(simpleOffset.y) && !isNaN(simpleOffset.z) &&
+                            isFinite(simpleOffset.x) && isFinite(simpleOffset.y) && isFinite(simpleOffset.z)) {
+                            // 确保起点和终点都在合理的高度（至少在地面上方）
+                            let startPos = currentPos;
+                            let endPos = simpleOffset;
+                            
+                            // 如果起点高度过低，稍微抬高
+                            try {
+                                const startCart = Cesium.Cartographic.fromCartesian(startPos);
+                                if (startCart.height < 0) {
+                                    startPos = Cesium.Cartesian3.fromRadians(
+                                        startCart.longitude,
+                                        startCart.latitude,
+                                        Math.max(0, startCart.height) + 1.0
+                                    );
+                                }
+                            } catch (e) {
+                                // 忽略错误
+                            }
+                            
+                            // 如果终点高度过低，稍微抬高
+                            try {
+                                const endCart = Cesium.Cartographic.fromCartesian(endPos);
+                                if (endCart.height < 0) {
+                                    endPos = Cesium.Cartesian3.fromRadians(
+                                        endCart.longitude,
+                                        endCart.latitude,
+                                        Math.max(0, endCart.height) + 1.0
+                                    );
+                                }
+                            } catch (e) {
+                                // 忽略错误
+                            }
+                            
+                            return [startPos, endPos];
+                        }
+                    }
+                    
+                    // 如果所有方法都失败，至少返回一个基本的引导线（使用当前位置，但确保高度合理）
+                    let finalStartPos = currentPos;
+                    let finalEndPos = currentPos;
+                    
+                    // 确保起点和终点都在合理的高度
+                    try {
+                        const startCart = Cesium.Cartographic.fromCartesian(finalStartPos);
+                        if (startCart.height < 0) {
+                            finalStartPos = Cesium.Cartesian3.fromRadians(
+                                startCart.longitude,
+                                startCart.latitude,
+                                Math.max(0, startCart.height) + 1.0
+                            );
+                            finalEndPos = Cesium.Cartesian3.fromRadians(
+                                startCart.longitude,
+                                startCart.latitude,
+                                Math.max(0, startCart.height) + 50.0
+                            );
+                        } else {
+                            finalEndPos = Cesium.Cartesian3.fromRadians(
+                                startCart.longitude,
+                                startCart.latitude,
+                                startCart.height + 50.0
+                            );
+                        }
+                    } catch (e) {
+                        // 忽略错误，使用原始位置
+                    }
+                    
+                    return [finalStartPos, finalEndPos];
                 } catch (e) {
                     console.error(`[引导线错误] ${savedEntityId}: 未捕获的异常`, e);
-                    return [savedVehiclePosition, savedLabelWorldPosition]; // 恢复原来的fallback
+                    // 使用简单的fallback：计算一个默认偏移位置
+                    try {
+                        const cart = Cesium.Cartographic.fromCartesian(savedVehiclePosition);
+                        const fallbackPos = Cesium.Cartesian3.fromRadians(
+                            cart.longitude + 200 / (6378137 * Math.cos(cart.latitude)),
+                            cart.latitude + 200 / 6378137,
+                            (cart.height || 0) + 50
+                        );
+                        return [savedVehiclePosition, fallbackPos];
+                    } catch (e2) {
+                        return [savedVehiclePosition, savedVehiclePosition]; // 最后的fallback
+                    }
                 }
             }, false);
         };
@@ -1456,7 +1790,11 @@
             distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0.0, Number.POSITIVE_INFINITY), // 确保始终可见
             shadows: Cesium.ShadowMode.DISABLED, // 禁用阴影
             classificationType: Cesium.ClassificationType.BOTH, // 确保在地面和3D Tiles上都可见
-            depthFailMaterial: Cesium.Color.BLUE.withAlpha(0.9) // 深度测试失败时的材质
+            depthFailMaterial: Cesium.Color.BLUE.withAlpha(0.9), // 深度测试失败时的材质
+            // 确保引导线不被视锥体裁剪
+            granularity: undefined, // 使用默认精度
+            // 确保引导线在远距离也可见
+            followSurface: false // 不跟随表面，使用直线
         };
         
         // 强制触发渲染
@@ -1585,7 +1923,7 @@
                 disableDepthTestDistance: Number.POSITIVE_INFINITY  // 确保在最顶层显示
             },
             polyline: {
-                // 连接线：从轨迹点到标签位置（使用CallbackProperty动态更新，增强错误处理）
+                // 连接线：从轨迹点到标签位置（使用CallbackProperty动态更新，优先使用eyeOffset）
                 positions: new Cesium.CallbackProperty(() => {
                     try {
                         const entity = vehicleEntities.get(entityId);
@@ -1606,6 +1944,78 @@
                             return [currentPosition, labelWorldPosition];
                         }
                         
+                        // 关键修复：优先使用当前的eyeOffset（可能是避让算法调整后的值）
+                        if (entity.label && entity.label.eyeOffset) {
+                            try {
+                                let currentEyeOffset = entity.label.eyeOffset;
+                                if (currentEyeOffset instanceof Cesium.Cartesian3) {
+                                    currentEyeOffset = Cesium.Cartesian3.clone(currentEyeOffset);
+                                } else if (currentEyeOffset && currentEyeOffset.getValue) {
+                                    currentEyeOffset = Cesium.Cartesian3.clone(currentEyeOffset.getValue());
+                                } else {
+                                    currentEyeOffset = null;
+                                }
+                                
+                                if (currentEyeOffset && Cesium.defined(currentEyeOffset) &&
+                                    !isNaN(currentEyeOffset.x) && !isNaN(currentEyeOffset.y) && !isNaN(currentEyeOffset.z) &&
+                                    isFinite(currentEyeOffset.x) && isFinite(currentEyeOffset.y) && isFinite(currentEyeOffset.z)) {
+                                    
+                                    // 将eyeOffset转换为世界坐标偏移
+                                    const camera = viewer.camera;
+                                    const worldOffset = new Cesium.Cartesian3(
+                                        camera.right.x * currentEyeOffset.x + camera.up.x * currentEyeOffset.y + camera.direction.x * currentEyeOffset.z,
+                                        camera.right.y * currentEyeOffset.x + camera.up.y * currentEyeOffset.y + camera.direction.y * currentEyeOffset.z,
+                                        camera.right.z * currentEyeOffset.x + camera.up.z * currentEyeOffset.y + camera.direction.z * currentEyeOffset.z
+                                    );
+                                    
+                                    // 计算标签的实际世界坐标位置
+                                    const labelWorldPos = Cesium.Cartesian3.add(currentPos, worldOffset, new Cesium.Cartesian3());
+                                    
+                                    // 验证labelPos并确保高度合理（避免被地形裁剪）
+                                    if (labelWorldPos && Cesium.defined(labelWorldPos) &&
+                                        !isNaN(labelWorldPos.x) && !isNaN(labelWorldPos.y) && !isNaN(labelWorldPos.z) &&
+                                        isFinite(labelWorldPos.x) && isFinite(labelWorldPos.y) && isFinite(labelWorldPos.z)) {
+                                        // 确保起点和终点都在合理的高度（至少在地面上方）
+                                        let startPos = currentPos;
+                                        let endPos = labelWorldPos;
+                                        
+                                        // 如果起点高度过低，稍微抬高
+                                        try {
+                                            const startCart = Cesium.Cartographic.fromCartesian(startPos);
+                                            if (startCart.height < 0) {
+                                                startPos = Cesium.Cartesian3.fromRadians(
+                                                    startCart.longitude,
+                                                    startCart.latitude,
+                                                    Math.max(0, startCart.height) + 1.0
+                                                );
+                                            }
+                                        } catch (e) {
+                                            // 忽略错误
+                                        }
+                                        
+                                        // 如果终点高度过低，稍微抬高
+                                        try {
+                                            const endCart = Cesium.Cartographic.fromCartesian(endPos);
+                                            if (endCart.height < 0) {
+                                                endPos = Cesium.Cartesian3.fromRadians(
+                                                    endCart.longitude,
+                                                    endCart.latitude,
+                                                    Math.max(0, endCart.height) + 1.0
+                                                );
+                                            }
+                                        } catch (e) {
+                                            // 忽略错误
+                                        }
+                                        
+                                        return [startPos, endPos];
+                                    }
+                                }
+                            } catch (e) {
+                                // 如果eyeOffset计算失败，继续使用布局方案
+                            }
+                        }
+                        
+                        // 策略2：如果eyeOffset无效，使用布局方案重新计算标签位置
                         let cart;
                         try {
                             cart = Cesium.Cartographic.fromCartesian(currentPos);
@@ -1618,7 +2028,13 @@
                             return [currentPosition, labelWorldPosition];
                         }
                         
-                        const offset = calculateLabelOffset(point, entityId, currentPos, currentLabelLayout);
+                        // 获取当前布局（优先使用避让布局，否则使用默认布局）
+                        let layout = entityLayouts.get(entityId);
+                        if (!layout) {
+                            layout = currentLabelLayout;
+                        }
+                        
+                        const offset = calculateLabelOffset(point, entityId, currentPos, layout);
                         
                         if (isNaN(offset.offsetX) || isNaN(offset.offsetY) || isNaN(offset.offsetZ) ||
                             !isFinite(offset.offsetX) || !isFinite(offset.offsetY) || !isFinite(offset.offsetZ)) {
@@ -1683,7 +2099,11 @@
                 depthFailMaterial: Cesium.Color.BLUE.withAlpha(0.9), // 深度测试失败时的材质
                 // 关键修复：确保引导线完整显示
                 scaleByDistance: undefined, // 不使用距离缩放
-                translucencyByDistance: undefined // 不使用距离透明度
+                translucencyByDistance: undefined, // 不使用距离透明度
+                // 确保引导线不被视锥体裁剪
+                granularity: undefined, // 使用默认精度
+                // 确保引导线在远距离也可见
+                followSurface: false // 不跟随表面，使用直线
             }
         };
     }
