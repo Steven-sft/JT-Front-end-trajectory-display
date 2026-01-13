@@ -2,7 +2,7 @@ package com.ljj.toshow.demos.tools;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ljj.toshow.demos.pojo.Location;
-import javafx.util.Pair;
+import org.apache.commons.lang3.tuple.Pair;
 
 import java.io.File;
 import java.io.IOException;
@@ -57,12 +57,12 @@ public class hbaseTool {
         for (Location l : roadDataList) {
             double diff = abs(l.getLatitude() - Latitude);
             if (i < 10) {
-                targets.add(new Pair<>(new Pair<>(l, diff), i));
+                targets.add(Pair.of(Pair.of(l, diff), i));
                 i++;
             }else {
                 // 只有当新的数据比当前最大的差值更小时，才替换并保持排序
                 if (diff < targets.get(9).getKey().getValue()) {
-                    targets.set(9, new Pair<>(new Pair<>(l, diff), i));
+                    targets.set(9, Pair.of(Pair.of(l, diff), i));
                     targets.sort(Comparator.comparing(p -> p.getKey().getValue())); // 重新排序
                 }
                 i++;
@@ -79,7 +79,7 @@ public class hbaseTool {
             }
         }
         if(abs(d.getLatitude()-Latitude) < 0.005&&abs(d.getLongitude()-Longitude) < 0.005){
-        return new Pair<>(d, j);
+        return Pair.of(d, j);
 
         }else return null;
     }

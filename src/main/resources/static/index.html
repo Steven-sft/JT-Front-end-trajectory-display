@@ -7,97 +7,1914 @@
 </head>
 <body>
 <div id="cesiumContainer" style="width:100%;height:100vh;"></div>
-<div id="infoBox">
-    <div>总车辆数: <span id="totalCount">0</span></div>
-    <div>方向1车辆: <span id="direction1Count">0</span></div>
-    <div>方向2车辆: <span id="direction2Count">0</span></div>
+<div id="infoPanel">
+    <div id="panelHeader">
+        <div>监控面板</div>
+        <button id="toggleBtn" title="收起/展开面板">▲</button>
+    </div>
+    <div id="panelContent">
+        <div>总车辆数: <span id="totalCount">0</span></div>
+        <div>方向1车辆: <span id="direction1Count">0</span></div>
+        <div>方向2车辆: <span id="direction2Count">0</span></div>
+        <div id="status">状态: 连接中...</div>
+        <div>当前服务器: <span id="currentBroker">10.48.53.80</span></div>
+        <div>当前端口: <span id="currentPort">33368</span></div>
+
+        <div class="control-group">
+            <label for="vehicleList">选择车辆:</label>
+            <select id="vehicleList">
+                <option value="">-- 请选择车辆 --</option>
+            </select>
+            <button id="refreshBtn">刷新列表</button>
+            <button id="reconnectBtn">重新连接</button>
+        </div>
+        
+        <div class="control-group">
+            <label>标签布局方案:</label>
+            <select id="labelLayout">
+                <option value="5">布局5: 北偏东（30度，300-500m）</option>
+                <option value="6">布局6: 南偏东（150度，300-500m）</option>
+                <option value="7">布局7: 北偏西（330度，300-500m）</option>
+                <option value="8">布局8: 南偏西（210度，300-500m）</option>
+            </select>
+        </div>
+    </div>
 </div>
+
 <script>
-    Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI4Y2FkYmZlNC0zZTFhLTQzZjgtOTAxMC04ODQ1YWE0NTRiZjAiLCJpZCI6MjE1MzczLCJpYXQiOjE3MTU3NjYwMTR9.mpRLVbgOWVmBAtgdpU68N1S6_UnXYWyALKB_iEwrKf8';
+    // 全局错误处理，捕获未处理的Promise错误
+    window.addEventListener('error', function(event) {
+        console.error('[全局错误]', event.error);
+    });
+    
+    window.addEventListener('unhandledrejection', function(event) {
+        // 忽略Cesium Ion相关的错误
+        const reason = event.reason;
+        if (reason) {
+            // 检查是否是Ion相关的错误
+            const isIonError = 
+                (reason.message && (
+                    reason.message.includes('Ion') || 
+                    reason.message.includes('INVALID_TOKEN') ||
+                    reason.message.includes('Ion access disabled')
+                )) ||
+                (reason.response && (
+                    typeof reason.response === 'string' && reason.response.includes('INVALID_TOKEN')
+                )) ||
+                (reason.statusCode === 401 && reason.response && (
+                    reason.response.code === 'INVALID_TOKEN' ||
+                    (typeof reason.response === 'string' && reason.response.includes('INVALID_TOKEN'))
+                )) ||
+                (reason.url && reason.url.toString && reason.url.toString().includes('api.cesium.com'));
+            
+            if (isIonError) {
+                // 静默忽略Ion相关错误
+                event.preventDefault();
+                return;
+            }
+        }
+        // 其他错误才输出
+        console.error('[未处理的Promise错误]', event.reason);
+        event.preventDefault(); // 阻止默认的错误处理
+    });
+    
+    // 从URL参数获取端口号
+    const urlParams = new URLSearchParams(window.location.search);
+    const serverPort = urlParams.get('port') || '33368'; // 默认端口为33368
+    // 如果是在本地访问（localhost 或 127.0.0.1），默认使用 localhost；否则使用配置的地址
+    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    const broker = urlParams.get('broker') || (isLocal ? 'localhost' : '192.168.0.5'); // 默认服务器地址
 
+    // 在页面上显示当前使用的服务器和端口
+    document.getElementById('currentBroker').textContent = broker;
+    document.getElementById('currentPort').textContent = serverPort;
+
+    // 完全禁用Cesium Ion，避免401错误（必须在Viewer创建之前）
+    if (typeof Cesium !== 'undefined') {
+        // 设置空的access token
+        if (Cesium.Ion) {
+            Cesium.Ion.defaultAccessToken = '';
+        }
+        
+        // 拦截所有Ion相关的网络请求（更彻底的方法）
+        if (Cesium.Resource) {
+            const originalFetch = Cesium.Resource.prototype.fetch;
+            Cesium.Resource.prototype.fetch = function() {
+                const url = this.url;
+                if (url && (typeof url === 'string' || url.toString)) {
+                    const urlStr = url.toString();
+                    if (urlStr.includes('api.cesium.com') || urlStr.includes('cesium.com/v1')) {
+                        // 静默拒绝Ion请求，不输出错误
+                        return Promise.reject(new Error('Ion access disabled'));
+                    }
+                }
+                return originalFetch.apply(this, arguments);
+            };
+        }
+        
+        // 拦截XMLHttpRequest（Cesium可能使用）
+        const originalXHROpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function(method, url, ...args) {
+            if (url && (typeof url === 'string' || url.toString)) {
+                const urlStr = url.toString();
+                if (urlStr.includes('api.cesium.com') || urlStr.includes('cesium.com/v1')) {
+                    // 阻止Ion请求
+                    this.addEventListener('loadstart', function() {
+                        this.abort();
+                    });
+                }
+            }
+            return originalXHROpen.apply(this, [method, url, ...args]);
+        };
+        
+        // 禁用Ion Imagery Provider
+        if (Cesium.IonImageryProvider) {
+            const originalFromAssetId = Cesium.IonImageryProvider.fromAssetId;
+            Cesium.IonImageryProvider.fromAssetId = function() {
+                throw new Error('Ion Imagery Provider is disabled');
+            };
+        }
+    }
+    
+    // 初始化Cesium（不加载默认Ion底图）
+    // 默认使用OSM底图，并启用底图选择器
     const viewer = new Cesium.Viewer('cesiumContainer', {
-        terrainProvider: Cesium.createWorldTerrain()
+        terrainProvider: new Cesium.EllipsoidTerrainProvider(), // 使用椭球体，不加载地形数据，提高速度
+        timeline: false,
+        animation: false,
+        baseLayerPicker: true, // 启用底图选择器
+        geocoder: false, // 禁用地理编码器
+        homeButton: false, // 禁用主页按钮
+        sceneModePicker: false, // 禁用场景模式选择器
+        navigationHelpButton: false, // 禁用导航帮助按钮
+        fullscreenButton: false, // 禁用全屏按钮
+        requestRenderMode: false, // 禁用按需渲染，确保实时更新
+        maximumRenderTimeChange: Infinity, // 减少不必要的渲染
+        targetFrameRate: 60 // 设置目标帧率，确保流畅渲染
     });
+    
+    // 立即移除所有默认图层（包括可能的Ion图层）
+    viewer.imageryLayers.removeAll();
+    
+    // 禁用Ion相关功能，避免401错误
+    if (viewer.cesiumWidget && viewer.cesiumWidget.creditContainer) {
+        // 隐藏Ion相关的credit
+        const creditContainer = viewer.cesiumWidget.creditContainer;
+        if (creditContainer) {
+            creditContainer.style.display = 'none';
+        }
+    }
+    
+    // 强制Cesium持续渲染，即使没有用户交互
+    viewer.clock.shouldAnimate = false; // 禁用时钟动画
+    viewer.scene.requestRenderMode = false; // 确保禁用按需渲染
+    viewer.scene.globe.enableLighting = false; // 禁用光照以提高性能
+    
+    // 关键修复：创建一个持续渲染的循环，确保即使没有用户交互也会渲染
+    // 使用 requestAnimationFrame 创建持续渲染循环，强制Cesium持续渲染
+    const continuousRenderLoop = function() {
+        viewer.scene.requestRender();
+        requestAnimationFrame(continuousRenderLoop);
+    };
+    // 启动持续渲染循环
+    continuousRenderLoop();
+    
+    // 移除默认的Cesium Ion底图
+    viewer.imageryLayers.removeAll();
+    
+    // 添加多个底图选项，默认使用OSM
+    // OSM底图（默认）
+    const osmLayer = viewer.imageryLayers.addImageryProvider(
+        new Cesium.OpenStreetMapImageryProvider({
+            url: 'https://a.tile.openstreetmap.org/'
+        })
+    );
+    
+    // 高德地图（作为备选）
+    const gaodeLayer = viewer.imageryLayers.addImageryProvider(
+        new Cesium.UrlTemplateImageryProvider({
+            url: 'https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+            credit: '高德地图',
+            tilingScheme: new Cesium.WebMercatorTilingScheme(),
+            maximumLevel: 18
+        })
+    );
+    gaodeLayer.show = false; // 默认不显示，用户可以通过底图选择器切换
+    
+    // 设置OSM为默认显示的底图
+    osmLayer.show = true;
 
-    // 初始化视角到中国
+    // 设置初始视角 - 垂直地面观察
+    // 参数说明：
+    // - 第一个参数：经度（longitude），范围 -180 到 180
+    // - 第二个参数：纬度（latitude），范围 -90 到 90
+    // - 第三个参数：高度（height），单位：米
+    // 当前设置：经度114.04556274414062，纬度30.91611099243300，高度5000米，垂直向下观察
     viewer.camera.flyTo({
-        destination: Cesium.Cartesian3.fromDegrees(114.03636,30.84627, 5000)
+        destination: Cesium.Cartesian3.fromDegrees(114.04556274414062, 30.91611099243300, 5000),
+        orientation: {
+            heading: Cesium.Math.toRadians(0),    // 朝向角度（0度=正北）
+            pitch: Cesium.Math.toRadians(-90),    // 俯仰角（-90度=垂直向下）
+            roll: 0.0                              // 翻滚角（通常为0）
+        },
+        duration: 2.0  // 飞行动画时长（秒），设置为0可立即跳转
     });
 
-    // 获取显示元素
-const totalDisplay = document.getElementById('totalCount');
-const dir1Display = document.getElementById('direction1Count');
-const dir2Display = document.getElementById('direction2Count');
+    // 车辆实体存储：车牌号 -> Cesium实体
+    const vehicleEntities = new Map();
+    // 基站实体存储：基站ID -> Cesium实体
+    const baseStationEntities = new Map();
+    let lastUpdateTime = 0;
+    let connectionErrorCount = 0;
+    let isPaused = false;
 
-// 单独更新车辆数
-async function updateNumbers() {
-    try {
-        const response = await fetch('http://100.65.38.139:33333/number');
-        const data = await response.json();
+    // DOM元素
+    const totalDisplay = document.getElementById('totalCount');
+    const dir1Display = document.getElementById('direction1Count');
+    const dir2Display = document.getElementById('direction2Count');
+    const statusDisplay = document.getElementById('status');
+    const vehicleList = document.getElementById('vehicleList');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const reconnectBtn = document.getElementById('reconnectBtn');
 
+    // 事件监听
+    vehicleList.addEventListener('change', focusVehicle);
+    refreshBtn.addEventListener('click', refreshVehicleList);
+    reconnectBtn.addEventListener('click', reconnect);
+
+    // 面板折叠功能
+    const infoPanel = document.getElementById('infoPanel');
+    const toggleBtn = document.getElementById('toggleBtn');
+    const panelContent = document.getElementById('panelContent');
+
+    toggleBtn.addEventListener('click', function() {
+        if (panelContent.style.display === 'none') {
+            panelContent.style.display = 'block';
+            toggleBtn.textContent = '▲';
+            toggleBtn.title = '收起面板';
+            // 恢复展开状态时的宽度
+            infoPanel.style.width = '';
+        } else {
+            panelContent.style.display = 'none';
+            toggleBtn.textContent = '▼';
+            toggleBtn.title = '展开面板';
+            // 折叠时缩小面板宽度
+            infoPanel.style.width = '140px';
+        }
+    });
+
+    // 标签布局方案（5-8）
+    let currentLabelLayout = 5; // 默认布局5
+    
+    // 获取布局选择器
+    const labelLayoutSelect = document.getElementById('labelLayout');
+    labelLayoutSelect.addEventListener('change', function() {
+        currentLabelLayout = parseInt(this.value);
+        // 重新计算所有标签位置
+        vehicleEntities.forEach((entity, entityId) => {
+            const point = latestPoints.get(entityId);
+            if (point && entity.position) {
+                updateLabelPosition(entity, point, entityId);
+            }
+        });
+    });
+
+    // 初始化
+    updateStatus('正在加载...');
+    loadBaseStations();
+    fetchVehicleData();
+
+    // 启动定时更新
+    const updateInterval = setInterval(() => {
+        if (!isPaused) {
+            fetchVehicleData();
+        }
+    }, 400);
+    
+    // 确保Cesium使用默认渲染循环，持续渲染
+    viewer.useDefaultRenderLoop = true;
+
+    // 获取车辆数据
+    async function fetchVehicleData() {
+        try {
+            const [points, numbers] = await Promise.all([
+                 fetchWithTimeout(`http://${broker}:${serverPort}/points`, 10000),
+                fetchWithTimeout(`http://${broker}:${serverPort}/number`, 3000)
+            ]);
+
+            if (!points.ok || !numbers.ok) {
+                throw new Error(`API响应错误: points ${points.status}, numbers ${numbers.status}`);
+            }
+
+            const pointsData = await points.json();
+            const numbersData = await numbers.json();
+
+            // 调试：检查接收到的数据中是否包含 specialFlag 字段
+            if (pointsData && pointsData.length > 0) {
+                const firstPoint = pointsData[0];
+                if (firstPoint.specialFlag !== undefined) {
+                    console.log(`[调试-接收数据] 第一个点的 specialFlag:`, firstPoint.specialFlag, "类型:", typeof firstPoint.specialFlag);
+                } else {
+                    console.log(`[调试-接收数据] 第一个点没有 specialFlag 字段，可用字段:`, Object.keys(firstPoint));
+                }
+            }
+
+            updatePoints(pointsData);
+            updateNumbers(numbersData);
+            connectionErrorCount = 0;
+            updateStatus(`最后更新: ${new Date().toLocaleTimeString()}`);
+
+        } catch (error) {
+            handleFetchError(error);
+        }
+    }
+
+    // 带超时的fetch
+    function fetchWithTimeout(url, timeout) {
+        return Promise.race([
+            fetch(url),
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('请求超时')), timeout)
+            )
+        ]);
+    }
+
+    // 更新点数据（增量更新）
+    function updatePoints(points) {
+        const startTime = Date.now();
+        const newVehicleIds = new Set();
+
+        // 处理所有点，如果同一辆车有多个点，只保留最后一个（按顺序处理，后面的覆盖前面的）
+        // 先收集所有车辆的最新位置
+        const latestPoints = new Map();
+        points.forEach(point => {
+            const entityId = `${point.name}_${point.id}`;
+            // 如果同一辆车有多个点，保留最后一个（时间戳最新的）
+            if (!latestPoints.has(entityId)) {
+                latestPoints.set(entityId, point);
+            } else {
+                // 比较时间戳，保留更新的
+                const existingPoint = latestPoints.get(entityId);
+                const existingTime = existingPoint.timeStampStr || '';
+                const newTime = point.timeStampStr || '';
+                // 如果新点的时间戳更新，则替换
+                if (newTime > existingTime || !existingTime) {
+                    latestPoints.set(entityId, point);
+                }
+            }
+            newVehicleIds.add(entityId);
+        });
+
+        // 更新或新增车辆实体（使用每个车辆的最新位置）
+        // 先收集所有车辆位置，用于计算标签重叠避免
+        const vehiclePositions = new Map();
+        latestPoints.forEach((point, entityId) => {
+            const newPosition = Cesium.Cartesian3.fromDegrees(point.longitude, point.latitude);
+            vehiclePositions.set(entityId, newPosition);
+        });
+        
+        latestPoints.forEach((point, entityId) => {
+            const newPosition = vehiclePositions.get(entityId);
+
+            if (!vehicleEntities.has(entityId)) {
+                // 创建新实体
+                const entity = viewer.entities.add(createVehicleEntity(point, entityId, vehiclePositions));
+                vehicleEntities.set(entityId, entity);
+            } else {
+                // 更新现有实体位置
+                const entity = vehicleEntities.get(entityId);
+
+                // 更新车辆位置
+                entity.position = newPosition;
+                
+                // 更新标签内容和样式
+                entity.label.text = `${point.name} | ${point.timeStampStr} | ${point.id}`;
+                // 字号改为16
+                entity.label.font = '16px sans-serif';
+                
+                // 确保标签显示（检查show属性是否为CallbackProperty，如果是则保持，否则设为true）
+                if (!(entity.label.show instanceof Cesium.CallbackProperty)) {
+                    entity.label.show = true;
+                }
+                
+                // 更新标签位置和连接线（使用布局方案）
+                updateLabelPosition(entity, point, entityId, newPosition);
+                
+                // 强制刷新polyline，确保引导线完整显示
+                if (entity.polyline) {
+                    // 确保show属性为true（不使用CallbackProperty）
+                    entity.polyline.show = true;
+                    
+                    // 确保引导线完整显示的属性（强制应用所有设置）
+                    entity.polyline.show = true;
+                    entity.polyline.width = 3;
+                    entity.polyline.material = Cesium.Color.BLUE.withAlpha(0.9);
+                    entity.polyline.disableDepthTestDistance = Number.POSITIVE_INFINITY;
+                    entity.polyline.distanceDisplayCondition = new Cesium.DistanceDisplayCondition(0.0, Number.POSITIVE_INFINITY);
+                    entity.polyline.shadows = Cesium.ShadowMode.DISABLED;
+                    entity.polyline.classificationType = Cesium.ClassificationType.BOTH;
+                    entity.polyline.depthFailMaterial = Cesium.Color.BLUE.withAlpha(0.9);
+                    entity.polyline.clampToGround = false;
+                    entity.polyline.arcType = Cesium.ArcType.NONE;
+                    // 移除可能影响显示的属性
+                    entity.polyline.scaleByDistance = undefined;
+                    entity.polyline.translucencyByDistance = undefined;
+                    
+                    // 强制触发positions更新
+                    try {
+                        const positions = entity.polyline.positions;
+                        if (positions instanceof Cesium.CallbackProperty) {
+                            // 通过重新赋值来强制触发更新
+                            entity.polyline.positions = positions;
+                        }
+                    } catch (e) {
+                        console.error(`[引导线] ${entityId}: 刷新positions失败`, e);
+                    }
+                    
+                    // 强制触发渲染
+                    viewer.scene.requestRender();
+                    
+                    // 调试：输出polyline状态（仅对前几个车辆，避免刷屏）
+                    if (Math.random() < 0.05) {
+                        try {
+                            const posArray = entity.polyline.positions instanceof Cesium.CallbackProperty 
+                                ? entity.polyline.positions.getValue() 
+                                : entity.polyline.positions;
+                            console.log(`[引导线调试] ${entityId}:`, {
+                                hasPolyline: !!entity.polyline,
+                                show: entity.polyline.show,
+                                width: entity.polyline.width,
+                                hasPositions: !!posArray,
+                                positionsLength: posArray ? posArray.length : 0,
+                                positionsValid: posArray && Array.isArray(posArray) && posArray.length === 2
+                            });
+                        } catch (e) {
+                            // 忽略调试错误
+                        }
+                    }
+                } else {
+                    // 如果polyline不存在，重新创建
+                    console.warn(`[引导线修复] ${entityId}: polyline不存在，重新创建`);
+                    updateLabelPosition(entity, point, entityId, newPosition);
+                }
+                
+                // 调试：输出标签位置信息
+                if (Math.random() < 0.01) { // 随机输出1%的调试信息，避免刷屏
+                    console.log(`[标签调试] 车辆 ${point.name}: eyeOffset=`, entity.label.eyeOffset, 
+                                'show=', entity.label.show);
+                }
+                
+                // 判断是否为预测点（specialFlag字段为99，支持数字和字符串类型）
+                // 调试：检查 specialFlag 的值和类型
+                if (point.specialFlag !== undefined && point.specialFlag !== null) {
+                    console.log(`[调试-更新] 车辆 ${point.name} (ID: ${point.id}) specialFlag:`, point.specialFlag, "类型:", typeof point.specialFlag, "是否预测点:", (point.specialFlag === 99 || point.specialFlag === "99"));
+                }
+                const isPredicted = point.specialFlag === 99 || point.specialFlag === "99";
+                // 预测点使用绿色标签，普通点使用橙色标签
+                entity.label.fillColor = isPredicted ? Cesium.Color.GREEN : new Cesium.Color(1.0, 0.647, 0.0, 1.0);
+                entity.label.outlineColor = Cesium.Color.BLACK; // 黑色描边
+                entity.label.outlineWidth = 3;
+                entity.label.style = Cesium.LabelStyle.FILL_AND_OUTLINE;
+                
+                // 预测点的位置点也使用绿色，普通点根据direction设置颜色
+                if (isPredicted) {
+                    entity.point.color = Cesium.Color.GREEN;
+                } else {
+                    entity.point.color = point.direction === 1 ? Cesium.Color.RED : Cesium.Color.BLUE;
+                }
+                // 设置height为0，避免地形轮廓线警告
+                if (entity.point) {
+                    entity.point.height = 0;
+                }
+            }
+        });
+
+        // 移除消失的车辆
+        vehicleEntities.forEach((entity, id) => {
+            if (!newVehicleIds.has(id)) {
+                viewer.entities.remove(entity);
+                vehicleEntities.delete(id);
+            }
+        });
+
+        // 强制触发渲染，确保位置更新立即显示
+        // 使用多种方式确保渲染
+        viewer.scene.requestRender();
+        // 强制更新所有实体的位置，触发重新渲染
+        latestPoints.forEach((point, entityId) => {
+            const entity = vehicleEntities.get(entityId);
+            if (entity && entity.position) {
+                // 强制触发位置属性更新
+                const newPosition = Cesium.Cartesian3.fromDegrees(point.longitude, point.latitude);
+                entity.position = newPosition;
+            }
+        });
+        
+        // 再次请求渲染
+        viewer.scene.requestRender();
+
+        console.log(`更新${points.length}个数据点，处理后${latestPoints.size}辆车，耗时${Date.now() - startTime}ms`);
+    }
+    
+    // 标签避让算法：基于3D空间的碰撞检测和动态调整
+    // 直接调整eyeOffset（3D空间偏移），避免标签在3D空间中重叠
+    function avoidLabelOverlap() {
+        try {
+            // 收集所有车辆和标签的3D位置信息
+            const labelInfos = [];
+            
+            vehicleEntities.forEach((entity, entityId) => {
+                if (!entity.label || !entity.position) return;
+                
+                try {
+                    // 获取车辆的世界坐标位置
+                    const vehicleWorldPos = entity.position.getValue();
+                    if (!vehicleWorldPos) return;
+                    
+                    // 获取当前的eyeOffset
+                    let eyeOffset = entity.label.eyeOffset;
+                    if (eyeOffset instanceof Cesium.Cartesian3) {
+                        eyeOffset = Cesium.Cartesian3.clone(eyeOffset);
+                    } else if (eyeOffset && eyeOffset.getValue) {
+                        eyeOffset = Cesium.Cartesian3.clone(eyeOffset.getValue());
+                    } else {
+                        eyeOffset = new Cesium.Cartesian3(0, 0, 0);
+                    }
+                    
+                    // 计算标签的实际3D世界位置
+                    // eyeOffset是相对于相机的，需要转换为世界坐标
+                    const camera = viewer.camera;
+                    const cameraRight = camera.right;
+                    const cameraUp = camera.up;
+                    const cameraForward = camera.direction;
+                    
+                    // 将eyeOffset转换为世界坐标偏移
+                    const worldOffset = new Cesium.Cartesian3(
+                        cameraRight.x * eyeOffset.x + cameraUp.x * eyeOffset.y + cameraForward.x * eyeOffset.z,
+                        cameraRight.y * eyeOffset.x + cameraUp.y * eyeOffset.y + cameraForward.y * eyeOffset.z,
+                        cameraRight.z * eyeOffset.x + cameraUp.z * eyeOffset.y + cameraForward.z * eyeOffset.z
+                    );
+                    
+                    const labelWorldPos = Cesium.Cartesian3.add(vehicleWorldPos, worldOffset, new Cesium.Cartesian3());
+                    
+                    labelInfos.push({
+                        entity: entity,
+                        entityId: entityId,
+                        vehiclePos: vehicleWorldPos,
+                        labelPos: labelWorldPos,
+                        eyeOffset: eyeOffset
+                    });
+                } catch (e) {
+                    // 忽略单个标签的错误
+                }
+            });
+            
+            // 检测并解决3D空间中的重叠
+            const minSeparationDistance = 80; // 最小分离距离（米）
+            const maxIterations = 3;
+            
+            for (let iteration = 0; iteration < maxIterations; iteration++) {
+                let hasOverlap = false;
+                
+                for (let i = 0; i < labelInfos.length; i++) {
+                    for (let j = i + 1; j < labelInfos.length; j++) {
+                        const info1 = labelInfos[i];
+                        const info2 = labelInfos[j];
+                        
+                        // 计算两个标签之间的3D距离
+                        const distance = Cesium.Cartesian3.distance(info1.labelPos, info2.labelPos);
+                        
+                        // 如果距离太近，需要分离
+                        if (distance < minSeparationDistance) {
+                            hasOverlap = true;
+                            
+                            // 计算分离向量（从info1指向info2）
+                            const separationVector = Cesium.Cartesian3.subtract(
+                                info2.labelPos, 
+                                info1.labelPos, 
+                                new Cesium.Cartesian3()
+                            );
+                            
+                            // 归一化分离向量
+                            const separationLength = Cesium.Cartesian3.magnitude(separationVector);
+                            
+                            if (separationLength < 0.001) {
+                                // 如果距离太近，随机分离
+                                const randomAngle = Math.random() * Math.PI * 2;
+                                const randomElevation = (Math.random() - 0.5) * Math.PI / 4; // -22.5到22.5度
+                                const separation = minSeparationDistance / 2;
+                                
+                                // 在水平面上随机方向
+                                const offsetX = Math.cos(randomAngle) * Math.cos(randomElevation) * separation;
+                                const offsetY = Math.sin(randomAngle) * Math.cos(randomElevation) * separation;
+                                const offsetZ = Math.sin(randomElevation) * separation;
+                                
+                                // 转换为相机空间的eyeOffset
+                                const camera = viewer.camera;
+                                const worldOffset1 = new Cesium.Cartesian3(-offsetX, -offsetY, -offsetZ);
+                                const worldOffset2 = new Cesium.Cartesian3(offsetX, offsetY, offsetZ);
+                                
+                                // 投影到相机坐标系
+                                const eyeOffset1X = Cesium.Cartesian3.dot(worldOffset1, camera.right);
+                                const eyeOffset1Y = Cesium.Cartesian3.dot(worldOffset1, camera.up);
+                                const eyeOffset1Z = Cesium.Cartesian3.dot(worldOffset1, camera.direction);
+                                
+                                const eyeOffset2X = Cesium.Cartesian3.dot(worldOffset2, camera.right);
+                                const eyeOffset2Y = Cesium.Cartesian3.dot(worldOffset2, camera.up);
+                                const eyeOffset2Z = Cesium.Cartesian3.dot(worldOffset2, camera.direction);
+                                
+                                info1.eyeOffset.x += eyeOffset1X;
+                                info1.eyeOffset.y += eyeOffset1Y;
+                                info1.eyeOffset.z += eyeOffset1Z;
+                                
+                                info2.eyeOffset.x += eyeOffset2X;
+                                info2.eyeOffset.y += eyeOffset2Y;
+                                info2.eyeOffset.z += eyeOffset2Z;
+                            } else {
+                                // 沿分离方向移动
+                                const separation = (minSeparationDistance - distance) / 2;
+                                const normalizedVector = Cesium.Cartesian3.multiplyByScalar(
+                                    separationVector,
+                                    separation / separationLength,
+                                    new Cesium.Cartesian3()
+                                );
+                                
+                                // 转换为相机空间的eyeOffset
+                                const camera = viewer.camera;
+                                const worldOffset1 = Cesium.Cartesian3.multiplyByScalar(normalizedVector, -1, new Cesium.Cartesian3());
+                                const worldOffset2 = normalizedVector;
+                                
+                                // 投影到相机坐标系
+                                const eyeOffset1X = Cesium.Cartesian3.dot(worldOffset1, camera.right);
+                                const eyeOffset1Y = Cesium.Cartesian3.dot(worldOffset1, camera.up);
+                                const eyeOffset1Z = Cesium.Cartesian3.dot(worldOffset1, camera.direction);
+                                
+                                const eyeOffset2X = Cesium.Cartesian3.dot(worldOffset2, camera.right);
+                                const eyeOffset2Y = Cesium.Cartesian3.dot(worldOffset2, camera.up);
+                                const eyeOffset2Z = Cesium.Cartesian3.dot(worldOffset2, camera.direction);
+                                
+                                info1.eyeOffset.x += eyeOffset1X;
+                                info1.eyeOffset.y += eyeOffset1Y;
+                                info1.eyeOffset.z += eyeOffset1Z;
+                                
+                                info2.eyeOffset.x += eyeOffset2X;
+                                info2.eyeOffset.y += eyeOffset2Y;
+                                info2.eyeOffset.z += eyeOffset2Z;
+                            }
+                            
+                            // 更新标签的3D位置（用于下次迭代）
+                            const camera = viewer.camera;
+                            const worldOffset1 = new Cesium.Cartesian3(
+                                camera.right.x * info1.eyeOffset.x + camera.up.x * info1.eyeOffset.y + camera.direction.x * info1.eyeOffset.z,
+                                camera.right.y * info1.eyeOffset.x + camera.up.y * info1.eyeOffset.y + camera.direction.y * info1.eyeOffset.z,
+                                camera.right.z * info1.eyeOffset.x + camera.up.z * info1.eyeOffset.y + camera.direction.z * info1.eyeOffset.z
+                            );
+                            info1.labelPos = Cesium.Cartesian3.add(info1.vehiclePos, worldOffset1, new Cesium.Cartesian3());
+                            
+                            const worldOffset2 = new Cesium.Cartesian3(
+                                camera.right.x * info2.eyeOffset.x + camera.up.x * info2.eyeOffset.y + camera.direction.x * info2.eyeOffset.z,
+                                camera.right.y * info2.eyeOffset.x + camera.up.y * info2.eyeOffset.y + camera.direction.y * info2.eyeOffset.z,
+                                camera.right.z * info2.eyeOffset.x + camera.up.z * info2.eyeOffset.y + camera.direction.z * info2.eyeOffset.z
+                            );
+                            info2.labelPos = Cesium.Cartesian3.add(info2.vehiclePos, worldOffset2, new Cesium.Cartesian3());
+                        }
+                    }
+                }
+                
+                if (!hasOverlap) break;
+            }
+            
+            // 应用调整后的eyeOffset（平滑过渡）
+            labelInfos.forEach(({ entity, eyeOffset }) => {
+                try {
+                    // 获取当前的eyeOffset
+                    let currentEyeOffset = entity.label.eyeOffset;
+                    if (!currentEyeOffset) {
+                        currentEyeOffset = new Cesium.Cartesian3(0, 0, 0);
+                    } else if (currentEyeOffset instanceof Cesium.Cartesian3) {
+                        currentEyeOffset = currentEyeOffset;
+                    } else if (currentEyeOffset && currentEyeOffset.getValue) {
+                        currentEyeOffset = currentEyeOffset.getValue();
+                    } else {
+                        currentEyeOffset = new Cesium.Cartesian3(0, 0, 0);
+                    }
+                    
+                    // 平滑插值（0.4的插值系数，平衡响应速度和稳定性）
+                    const lerpFactor = 0.4;
+                    const newX = currentEyeOffset.x + (eyeOffset.x - currentEyeOffset.x) * lerpFactor;
+                    const newY = currentEyeOffset.y + (eyeOffset.y - currentEyeOffset.y) * lerpFactor;
+                    const newZ = currentEyeOffset.z + (eyeOffset.z - currentEyeOffset.z) * lerpFactor;
+                    
+                    // 限制最大偏移（避免标签偏离太远，单位：米）
+                    const maxOffset = 250; // 最大250米
+                    const currentMagnitude = Math.sqrt(newX * newX + newY * newY + newZ * newZ);
+                    if (currentMagnitude > maxOffset) {
+                        const scale = maxOffset / currentMagnitude;
+                        entity.label.eyeOffset = new Cesium.Cartesian3(newX * scale, newY * scale, newZ * scale);
+                    } else {
+                        entity.label.eyeOffset = new Cesium.Cartesian3(newX, newY, newZ);
+                    }
+                    
+                    // 修复2：标签避让算法更新eyeOffset后，强制触发引导线positions更新
+                    if (entity.polyline && entity.polyline.positions) {
+                        try {
+                            const positions = entity.polyline.positions;
+                            if (positions instanceof Cesium.CallbackProperty) {
+                                // 通过重新赋值来强制触发更新
+                                entity.polyline.positions = positions;
+                            }
+                        } catch (e) {
+                            // 忽略错误
+                        }
+                    }
+                } catch (e) {
+                    // 忽略单个标签的错误
+                }
+            });
+            
+            // 修复2：标签避让算法完成后，强制重新渲染场景
+            viewer.scene.requestRender();
+        } catch (e) {
+            console.error('[标签避让] 错误:', e);
+        }
+    }
+
+    // 计算标签位置和偏移（根据布局方案）- 增强数值验证
+    function calculateLabelOffset(point, entityId, vehiclePosition, layout) {
+        try {
+            // 根据entityId生成一个稳定的哈希值，用于计算偏移
+            let hash = 0;
+            if (entityId && entityId.length > 0) {
+                for (let i = 0; i < entityId.length; i++) {
+                    hash = ((hash << 5) - hash) + entityId.charCodeAt(i);
+                    hash = hash & hash; // 转换为32位整数
+                }
+            }
+            
+            // 增加偏移距离到300-500m，避免标签太近
+            const offsetDistance = 300 + (Math.abs(hash) % 201); // 300-500m
+            // 增加高度变化范围，避免标签和引导线重合
+            const offsetZ = (Math.abs(hash) % 101) - 50; // -50到50米，更大的高度变化
+            
+            let offsetX, offsetY, offsetAngle;
+            
+            // 确保layout在有效范围内
+            const validLayout = (layout >= 5 && layout <= 8) ? layout : 5;
+            
+            switch(validLayout) {
+                case 5: // 布局5: 北偏东（30度）
+                    offsetAngle = Math.PI / 6; // 30度（北偏东）
+                    break;
+                    
+                case 6: // 布局6: 南偏东（150度）
+                    offsetAngle = 5 * Math.PI / 6; // 150度（南偏东）
+                    break;
+                    
+                case 7: // 布局7: 北偏西（330度）
+                    offsetAngle = -Math.PI / 6; // -30度（330度，北偏西）
+                    break;
+                    
+                case 8: // 布局8: 南偏西（210度）
+                    offsetAngle = -5 * Math.PI / 6; // -150度（210度，南偏西）
+                    break;
+                    
+                default:
+                    offsetAngle = Math.PI / 6; // 默认：北偏东（30度）
+            }
+            
+            // 计算偏移值
+            offsetX = Math.sin(offsetAngle) * offsetDistance;
+            offsetY = -Math.cos(offsetAngle) * offsetDistance;
+            
+            // 修复5：优化数值验证和错误处理
+            // 验证所有值都是有效数字
+            if (isNaN(offsetX) || isNaN(offsetY) || isNaN(offsetZ) || 
+                !isFinite(offsetX) || !isFinite(offsetY) || !isFinite(offsetZ)) {
+                console.error(`[calculateLabelOffset] ${entityId}: 计算结果包含无效值`, {
+                    offsetX, offsetY, offsetZ, offsetDistance, offsetAngle, layout
+                });
+                // 返回安全的默认值（确保距离足够，引导线可见）
+                return { offsetX: 300, offsetY: -300, offsetZ: 50 };
+            }
+            
+            // 修复5：验证偏移距离是否足够（至少100米，确保引导线可见）
+            const offsetMagnitude = Math.sqrt(offsetX * offsetX + offsetY * offsetY);
+            if (offsetMagnitude < 100) {
+                console.warn(`[calculateLabelOffset] ${entityId}: 偏移距离过小 ${offsetMagnitude.toFixed(2)}米，调整为100米`);
+                const scale = 100 / offsetMagnitude;
+                return { offsetX: offsetX * scale, offsetY: offsetY * scale, offsetZ: offsetZ };
+            }
+            
+            return { offsetX, offsetY, offsetZ };
+        } catch (e) {
+            console.error(`[calculateLabelOffset] ${entityId}: 计算错误`, e);
+            // 返回安全的默认值（确保距离足够，引导线可见）
+            return { offsetX: 300, offsetY: -300, offsetZ: 50 };
+        }
+    }
+    
+    // 更新标签位置和连接线
+    function updateLabelPosition(entity, point, entityId, vehiclePosition) {
+        if (!vehiclePosition) {
+            vehiclePosition = entity.position.getValue();
+        }
+        
+        // 计算标签偏移
+        const { offsetX, offsetY, offsetZ } = calculateLabelOffset(point, entityId, vehiclePosition, currentLabelLayout);
+        
+        // 更新标签的eyeOffset
+        entity.label.eyeOffset = new Cesium.Cartesian3(offsetX, offsetY, offsetZ);
+        
+        // 计算标签的实际世界坐标位置
+        const cartographic = Cesium.Cartographic.fromCartesian(vehiclePosition);
+        const latOffsetRadians = offsetY / 6378137;
+        const lonOffsetRadians = offsetX / (6378137 * Math.cos(cartographic.latitude));
+        const labelWorldPosition = Cesium.Cartesian3.fromRadians(
+            cartographic.longitude + lonOffsetRadians,
+            cartographic.latitude + latOffsetRadians,
+            cartographic.height + offsetZ
+        );
+        
+        // 更新或创建连接线（全面修复 + 调试）
+        // 使用闭包保存point和entityId，避免在CallbackProperty中访问可能变化的值
+        const savedPoint = point;
+        const savedEntityId = entityId;
+        const savedVehiclePosition = vehiclePosition;
+        const savedLabelWorldPosition = labelWorldPosition;
+        
+        // 调试计数器，用于追踪特定车辆的引导线
+        const debugCounter = { count: 0 };
+        
+        const createPolylineCallback = () => {
+            return new Cesium.CallbackProperty(() => {
+                debugCounter.count++;
+                // 每100次调用输出一次调试信息（避免刷屏）
+                const shouldDebug = debugCounter.count % 100 === 0;
+                
+                try {
+                    // 获取当前实体位置
+                    if (!entity || !entity.position) {
+                        if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: entity或position不存在`);
+                        return [savedVehiclePosition, savedLabelWorldPosition];
+                    }
+                    
+                    let currentPos;
+                    try {
+                        currentPos = entity.position.getValue();
+                    } catch (e) {
+                        if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: 获取position失败`, e);
+                        return [savedVehiclePosition, savedLabelWorldPosition];
+                    }
+                    
+                    if (!currentPos || !Cesium.defined(currentPos)) {
+                        if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: currentPos未定义`);
+                        return [savedVehiclePosition, savedLabelWorldPosition];
+                    }
+                    
+                    // 验证currentPos
+                    if (typeof currentPos.x !== 'number' || typeof currentPos.y !== 'number' || typeof currentPos.z !== 'number' ||
+                        isNaN(currentPos.x) || isNaN(currentPos.y) || isNaN(currentPos.z) ||
+                        !isFinite(currentPos.x) || !isFinite(currentPos.y) || !isFinite(currentPos.z)) {
+                        if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: currentPos包含无效值`, currentPos);
+                        return [savedVehiclePosition, savedLabelWorldPosition];
+                    }
+                    
+                    // 转换为地理坐标
+                    let cart;
+                    try {
+                        cart = Cesium.Cartographic.fromCartesian(currentPos);
+                    } catch (e) {
+                        if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: 坐标转换失败`, e);
+                        return [savedVehiclePosition, savedLabelWorldPosition];
+                    }
+                    
+                    if (!cart || isNaN(cart.longitude) || isNaN(cart.latitude) || 
+                        !isFinite(cart.longitude) || !isFinite(cart.latitude)) {
+                        if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: cart包含无效值`, cart);
+                        return [savedVehiclePosition, savedLabelWorldPosition];
+                    }
+                    
+                    // 策略2：直接使用savedLabelWorldPosition（调整到当前车辆位置）
+                    // 这样可以保证所有引导线都能显示，因为savedLabelWorldPosition是在updateLabelPosition时正确计算的
+                    if (savedLabelWorldPosition && Cesium.defined(savedLabelWorldPosition) &&
+                        !isNaN(savedLabelWorldPosition.x) && !isNaN(savedLabelWorldPosition.y) && !isNaN(savedLabelWorldPosition.z) &&
+                        isFinite(savedLabelWorldPosition.x) && isFinite(savedLabelWorldPosition.y) && isFinite(savedLabelWorldPosition.z)) {
+                        // 计算标签位置相对于保存的车辆位置的偏移向量
+                        const offsetVector = Cesium.Cartesian3.subtract(savedLabelWorldPosition, savedVehiclePosition, new Cesium.Cartesian3());
+                        // 将偏移向量应用到当前车辆位置，得到调整后的标签位置
+                        const adjustedLabelPos = Cesium.Cartesian3.add(currentPos, offsetVector, new Cesium.Cartesian3());
+                        
+                        // 验证调整后的labelPos
+                        if (adjustedLabelPos && Cesium.defined(adjustedLabelPos) &&
+                            !isNaN(adjustedLabelPos.x) && !isNaN(adjustedLabelPos.y) && !isNaN(adjustedLabelPos.z) &&
+                            isFinite(adjustedLabelPos.x) && isFinite(adjustedLabelPos.y) && isFinite(adjustedLabelPos.z)) {
+                            return [currentPos, adjustedLabelPos];
+                        }
+                    }
+                    
+                    // 如果savedLabelWorldPosition无效，使用保存的值作为fallback
+                    if (shouldDebug) console.warn(`[引导线调试] ${savedEntityId}: savedLabelWorldPosition无效，使用fallback`);
+                    return [savedVehiclePosition, savedLabelWorldPosition];
+                } catch (e) {
+                    console.error(`[引导线错误] ${savedEntityId}: 未捕获的异常`, e);
+                    return [savedVehiclePosition, savedLabelWorldPosition]; // 恢复原来的fallback
+                }
+            }, false);
+        };
+        
+        // 简化show属性：直接设置为true，不使用CallbackProperty，避免显示问题
+        // 强制重新创建polyline，确保所有属性都正确
+        // 先移除旧的polyline属性（如果存在）
+        if (entity.polyline) {
+            try {
+                // 尝试清理旧的属性
+                if (entity.polyline.positions && entity.polyline.positions instanceof Cesium.CallbackProperty) {
+                    // CallbackProperty无法直接删除，但可以重新赋值
+                }
+            } catch (e) {
+                // 忽略错误
+            }
+        }
+        
+        // 创建新的polyline（每次都重新创建，确保一致性）
+        // 关键修复：show直接设置为true，不使用CallbackProperty
+        entity.polyline = {
+            positions: createPolylineCallback(),
+            width: 3,
+            material: Cesium.Color.BLUE.withAlpha(0.9), // 提高不透明度
+            clampToGround: false,
+            show: true,  // 直接设置为true，不使用CallbackProperty
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,  // 确保在最顶层显示
+            arcType: Cesium.ArcType.NONE, // 直线连接
+            distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0.0, Number.POSITIVE_INFINITY), // 确保始终可见
+            shadows: Cesium.ShadowMode.DISABLED, // 禁用阴影
+            classificationType: Cesium.ClassificationType.BOTH, // 确保在地面和3D Tiles上都可见
+            depthFailMaterial: Cesium.Color.BLUE.withAlpha(0.9) // 深度测试失败时的材质
+        };
+        
+        // 强制触发渲染
+        viewer.scene.requestRender();
+        
+        // 验证并修复polyline（延迟验证，确保Cesium已处理）
+        setTimeout(() => {
+            if (entity.polyline) {
+                const positions = entity.polyline.positions;
+                const show = entity.polyline.show;
+                let showValue = true;
+                try {
+                    if (show instanceof Cesium.CallbackProperty) {
+                        showValue = show.getValue();
+                    } else {
+                        showValue = show;
+                    }
+                } catch (e) {
+                    showValue = true;
+                }
+                
+                // 如果show为false，强制设置为true
+                if (!showValue) {
+                    console.warn(`[引导线修复] ${entityId}: show为false，强制设置为true`);
+                    entity.polyline.show = true;
+                    viewer.scene.requestRender();
+                }
+                
+                // 验证positions是否有效
+                try {
+                    if (positions instanceof Cesium.CallbackProperty) {
+                        const posArray = positions.getValue();
+                        if (!posArray || !Array.isArray(posArray) || posArray.length !== 2) {
+                            console.warn(`[引导线修复] ${entityId}: positions无效，重新创建`, posArray);
+                            entity.polyline.positions = createPolylineCallback();
+                            viewer.scene.requestRender();
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`[引导线修复] ${entityId}: positions获取失败，重新创建`, e);
+                    entity.polyline.positions = createPolylineCallback();
+                    viewer.scene.requestRender();
+                }
+                
+                // 输出验证信息（仅对前几个车辆输出，避免刷屏）
+                if (Math.random() < 0.1) {
+                    console.log(`[引导线验证] ${entityId}:`, {
+                        hasPolyline: !!entity.polyline,
+                        hasPositions: !!positions,
+                        positionsType: positions ? (positions instanceof Cesium.CallbackProperty ? 'CallbackProperty' : typeof positions) : 'null',
+                        hasShow: !!show,
+                        showValue: showValue,
+                        width: entity.polyline.width,
+                        hasMaterial: !!entity.polyline.material
+                    });
+                }
+            } else {
+                console.error(`[引导线错误] ${entityId}: polyline不存在`);
+            }
+        }, 200);
+    }
+
+    // 创建车辆实体 - 使用point.timeStampStr显示时间
+    function createVehicleEntity(point, entityId, vehiclePositions) {
+        // 判断是否为预测点（specialFlag字段为99，支持数字和字符串类型）
+        // 调试：检查 specialFlag 的值和类型
+        if (point.specialFlag !== undefined && point.specialFlag !== null) {
+            console.log(`[调试-创建] 车辆 ${point.name} (ID: ${point.id}) specialFlag:`, point.specialFlag, "类型:", typeof point.specialFlag);
+        }
+        const isPredicted = point.specialFlag === 99 || point.specialFlag === "99";
+        
+        // 根据是否为预测点设置不同的颜色
+        // 预测点：位置点和标签都使用绿色
+        // 普通点：位置点根据direction设置（1=红色，其他=蓝色），标签使用橙色
+        const pointColor = isPredicted 
+            ? Cesium.Color.GREEN
+            : (point.direction === 1 ? Cesium.Color.RED : Cesium.Color.BLUE);
+        const labelColor = isPredicted 
+            ? Cesium.Color.GREEN 
+            : new Cesium.Color(1.0, 0.647, 0.0, 1.0); // 橙色
+        
+        // 车辆位置
+        const currentPosition = Cesium.Cartesian3.fromDegrees(point.longitude, point.latitude);
+        
+        // 使用布局计算函数计算标签偏移
+        const { offsetX, offsetY, offsetZ } = calculateLabelOffset(point, entityId, currentPosition, currentLabelLayout);
+        
+        // 计算标签的实际世界坐标位置（考虑3D偏移）
+        const cartographic = Cesium.Cartographic.fromCartesian(currentPosition);
+        const latOffsetRadians = offsetY / 6378137;
+        const lonOffsetRadians = offsetX / (6378137 * Math.cos(cartographic.latitude));
+        const labelWorldPosition = Cesium.Cartesian3.fromRadians(
+            cartographic.longitude + lonOffsetRadians,
+            cartographic.latitude + latOffsetRadians,
+            cartographic.height + offsetZ
+        );
+        
+        return {
+            position: currentPosition,
+            point: {
+                pixelSize: 6, // 减小点大小
+                color: pointColor,
+                outlineColor: Cesium.Color.WHITE,
+                outlineWidth: 1, // 减小边框宽度
+                disableDepthTestDistance: Number.POSITIVE_INFINITY, // 确保在最顶层显示
+                height: 0 // 设置height为0，避免地形轮廓线警告
+            },
+            label: {
+                // 在标签中显示车牌号和时间戳字符串
+                text: `${point.name} | ${point.timeStampStr}`,
+                font: '16px sans-serif', // 字号改为16
+                fillColor: labelColor,
+                outlineColor: Cesium.Color.BLACK, // 黑色描边
+                outlineWidth: 3, // 描边宽度
+                style: Cesium.LabelStyle.FILL_AND_OUTLINE, // 确保使用填充和描边样式
+                
+                // 使用eyeOffset实现3D空间偏移（根据布局方案）
+                // eyeOffset是相对于相机视角的3D偏移，不受entity.position影响
+                eyeOffset: new Cesium.Cartesian3(offsetX, offsetY, offsetZ),
+                
+                // 标签显示逻辑：当车辆数量超过500时，只在近距离显示标签
+                show: new Cesium.CallbackProperty(() => {
+                    const cameraHeight = viewer.camera.positionCartographic.height;
+                    return vehicleEntities.size <= 500 || cameraHeight <= 2000;
+                }, false),
+                disableDepthTestDistance: Number.POSITIVE_INFINITY  // 确保在最顶层显示
+            },
+            polyline: {
+                // 连接线：从轨迹点到标签位置（使用CallbackProperty动态更新，增强错误处理）
+                positions: new Cesium.CallbackProperty(() => {
+                    try {
+                        const entity = vehicleEntities.get(entityId);
+                        if (!entity || !entity.position) {
+                            return [currentPosition, labelWorldPosition];
+                        }
+                        
+                        let currentPos;
+                        try {
+                            currentPos = entity.position.getValue();
+                        } catch (e) {
+                            return [currentPosition, labelWorldPosition];
+                        }
+                        
+                        if (!currentPos || !Cesium.defined(currentPos) ||
+                            isNaN(currentPos.x) || isNaN(currentPos.y) || isNaN(currentPos.z) ||
+                            !isFinite(currentPos.x) || !isFinite(currentPos.y) || !isFinite(currentPos.z)) {
+                            return [currentPosition, labelWorldPosition];
+                        }
+                        
+                        let cart;
+                        try {
+                            cart = Cesium.Cartographic.fromCartesian(currentPos);
+                        } catch (e) {
+                            return [currentPosition, labelWorldPosition];
+                        }
+                        
+                        if (!cart || isNaN(cart.longitude) || isNaN(cart.latitude) ||
+                            !isFinite(cart.longitude) || !isFinite(cart.latitude)) {
+                            return [currentPosition, labelWorldPosition];
+                        }
+                        
+                        const offset = calculateLabelOffset(point, entityId, currentPos, currentLabelLayout);
+                        
+                        if (isNaN(offset.offsetX) || isNaN(offset.offsetY) || isNaN(offset.offsetZ) ||
+                            !isFinite(offset.offsetX) || !isFinite(offset.offsetY) || !isFinite(offset.offsetZ)) {
+                            return [currentPosition, labelWorldPosition];
+                        }
+                        
+                        const cosLat = Math.cos(cart.latitude);
+                        if (Math.abs(cosLat) < 0.0001) {
+                            // 极地附近，使用简化计算
+                            const latOff = offset.offsetY / 6378137;
+                            const lonOff = offset.offsetX / 6378137;
+                            const labelPos = Cesium.Cartesian3.fromRadians(
+                                cart.longitude + lonOff,
+                                cart.latitude + latOff,
+                                (cart.height || 0) + offset.offsetZ
+                            );
+                            if (labelPos && Cesium.defined(labelPos) &&
+                                !isNaN(labelPos.x) && !isNaN(labelPos.y) && !isNaN(labelPos.z)) {
+                                return [currentPos, labelPos];
+                            }
+                        } else {
+                            const latOff = offset.offsetY / 6378137;
+                            const lonOff = offset.offsetX / (6378137 * cosLat);
+                            
+                            if (isNaN(latOff) || isNaN(lonOff) ||
+                                !isFinite(latOff) || !isFinite(lonOff)) {
+                                return [currentPosition, labelWorldPosition];
+                            }
+                            
+                            let labelPos;
+                            try {
+                                labelPos = Cesium.Cartesian3.fromRadians(
+                                    cart.longitude + lonOff,
+                                    cart.latitude + latOff,
+                                    (cart.height || 0) + offset.offsetZ
+                                );
+                            } catch (e) {
+                                return [currentPosition, labelWorldPosition];
+                            }
+                            
+                            if (labelPos && Cesium.defined(labelPos) &&
+                                !isNaN(labelPos.x) && !isNaN(labelPos.y) && !isNaN(labelPos.z) &&
+                                isFinite(labelPos.x) && isFinite(labelPos.y) && isFinite(labelPos.z)) {
+                                return [currentPos, labelPos];
+                            }
+                        }
+                        
+                        return [currentPosition, labelWorldPosition];
+                    } catch (e) {
+                        return [currentPosition, labelWorldPosition];
+                    }
+                }, false),
+                width: 3, // 增加线宽，更容易看到
+                material: Cesium.Color.BLUE.withAlpha(0.9), // 增加不透明度到0.9，更容易看到
+                clampToGround: false, // 不贴地，使用3D空间
+                show: true,  // 关键：直接设置为true，确保显示（不使用CallbackProperty）
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,  // 确保在最顶层显示
+                arcType: Cesium.ArcType.NONE, // 直线连接
+                distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0.0, Number.POSITIVE_INFINITY), // 确保始终可见
+                shadows: Cesium.ShadowMode.DISABLED, // 禁用阴影避免遮挡
+                classificationType: Cesium.ClassificationType.BOTH, // 确保在地面和3D Tiles上都可见
+                depthFailMaterial: Cesium.Color.BLUE.withAlpha(0.9), // 深度测试失败时的材质
+                // 关键修复：确保引导线完整显示
+                scaleByDistance: undefined, // 不使用距离缩放
+                translucencyByDistance: undefined // 不使用距离透明度
+            }
+        };
+    }
+
+    // 更新数字统计
+    function updateNumbers(data) {
         totalDisplay.textContent = data.total;
         dir1Display.textContent = data.direction1;
         dir2Display.textContent = data.direction2;
-    } catch (error) {
-        console.error('获取车辆数失败:', error);
     }
-}
-    async function updatePoints() {
-        const response = await fetch('http://100.65.38.139:33333/points');
-        const points = await response.json();
 
-        viewer.entities.removeAll();
+    // 刷新车辆列表 - 使用point.timeStampStr显示时间
+    async function refreshVehicleList() {
+        try {
+            const response = await fetch(`http://${broker}:${serverPort}/points`);
+            const points = await response.json();
 
+            // 清空现有列表
+            vehicleList.innerHTML = '<option value="">-- 请选择车辆 --</option>';
 
-        points.forEach(point => {
-            viewer.entities.add({
-                position: Cesium.Cartesian3.fromDegrees(point.longitude, point.latitude),
-                point: {
-                    pixelSize: 8,
-                    color:  Cesium.Color.GREEN,
-                    outlineColor: Cesium.Color.WHITE,
-                    outlineWidth: 2,
-                    disableDepthTestDistance: Number.POSITIVE_INFINITY
-                },
-                 label: {
-                    text: point.name,
-                    font: '14px sans-serif',
-                    pixelOffset: new Cesium.Cartesian2(0, 20),
-                    // 动态判断相机高度：高度超过5000米时隐藏标签
-                    show: new Cesium.CallbackProperty(() => {
-                        const cameraHeight = viewer.camera.positionCartographic.height;
-                        return cameraHeight <= 5000; // 当相机高度<=5000米时显示标签
-                    }, false),
-                    disableDepthTestDistance: Number.POSITIVE_INFINITY
-                }
+            // 添加新选项 - 显示车牌号和时间戳
+            points.forEach((point, index) => {
+                const option = document.createElement('option');
+                option.value = point.name;
+                // 在选项中显示车牌号和时间戳
+                option.textContent = `${index + 1}. ${point.name} (${point.timeStampStr})`;
+                vehicleList.appendChild(option);
             });
-        });
-    }
-// 同时更新点和数据
-async function updateAll() {
-    await updatePoints();
-    await updateNumbers();
-}
 
-    setInterval(updateAll, 200);
-    updatePoints();
+            updateStatus('车辆列表已刷新');
+
+        } catch (error) {
+            updateStatus(`刷新失败: ${error.message}`);
+        }
+    }
+
+    // 聚焦选定车辆
+    function focusVehicle() {
+        const selectedPlate = vehicleList.value;
+        if (!selectedPlate) return;
+
+        // 在现有车辆中查找
+        for (const [id, entity] of vehicleEntities) {
+            if (id.startsWith(selectedPlate)) {
+                viewer.camera.flyTo({
+                    destination: entity.position.getValue(Cesium.JulianDate.now()),
+                    offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-30), 500),
+                    duration: 1
+                });
+                return;
+            }
+        }
+
+        updateStatus('车辆当前不可见');
+    }
+
+    // 处理错误
+    function handleFetchError(error) {
+        console.error('数据获取失败:', error);
+        connectionErrorCount++;
+
+        // 添加更多错误信息
+        const errorDetails = `错误详情: ${error.message || '未知错误'}`;
+
+        updateStatus(`网络错误: ${errorDetails}`);
+        console.log(`网络错误: ${errorDetails}`);
+
+        if (connectionErrorCount > 3) {
+            updateStatus(`严重错误: 无法连接服务器 (${errorDetails})`);
+        console.log(`严重错误: 无法连接服务器 (${errorDetails})`);
+
+            isPaused = true;
+        }
+    }
+
+    // 重新连接
+    function reconnect() {
+        isPaused = false;
+        connectionErrorCount = 0;
+        updateStatus('正在尝试重新连接...');
+        fetchVehicleData();
+    }
+
+    // 更新状态显示
+    function updateStatus(message) {
+        statusDisplay.textContent = `状态: ${message}`;
+        statusDisplay.className = message.includes('错误') ? 'error' : '';
+    }
+
+    // 加载基站数据并可视化
+    async function loadBaseStations() {
+        try {
+            const response = await fetchWithTimeout(`http://${broker}:${serverPort}/basestations`, 5000);
+            if (!response.ok) {
+                console.error('获取基站数据失败:', response.status);
+                return;
+            }
+            
+            const stations = await response.json();
+            console.log('加载到 ' + stations.length + ' 个基站');
+            
+            // 创建所有基站实体
+            stations.forEach(station => {
+                createBaseStationEntity(station);
+            });
+            
+            // 自动修复所有基站圆形
+            if (typeof fixAllBaseStations === 'function') {
+                setTimeout(() => {
+                    console.log('自动修复所有基站圆形...');
+                    fixAllBaseStations();
+                }, 500);
+            }
+            
+        } catch (error) {
+            console.error('加载基站数据失败:', error);
+        }
+    }
+
+    // 创建基站实体（位置圆点和监测范围圆）
+    function createBaseStationEntity(station) {
+        const entityId = `basestation_${station.stationId}`;
+        
+        // 如果已存在，先移除
+        if (baseStationEntities.has(entityId)) {
+            viewer.entities.remove(baseStationEntities.get(entityId));
+        }
+        
+        // 将监测范围（米）转换为弧度（用于Cesium的圆形）
+        // Cesium的圆形半径单位是米，所以直接使用
+        const radiusInMeters = station.coverageRadius;
+        
+        // 标签高度（米）- 引导线终点高度
+        const labelHeight = 120; // 增加高度确保引导线可见
+        const labelOffset = 40; // 标签像素偏移量
+        
+        // 基站位置（地面位置）
+        const basePosition = Cesium.Cartesian3.fromDegrees(station.longitude, station.latitude);
+        
+        // 创建引导线的起点和终点位置
+        // 起点：地面位置（使用相对高度0，确保贴地）
+        const groundStart = Cesium.Cartesian3.fromDegrees(
+            station.longitude, 
+            station.latitude, 
+            0
+        );
+        
+        // 终点：标签位置（相对地面高度，确保引导线向上延伸）
+        const labelEnd = Cesium.Cartesian3.fromDegrees(
+            station.longitude, 
+            station.latitude, 
+            labelHeight
+        );
+        
+        // 创建基站实体
+        const entity = viewer.entities.add({
+            id: entityId,
+            // 基站位置圆点
+            position: basePosition,
+            point: {
+                pixelSize: 10,
+                color: Cesium.Color.BLUE,
+                outlineColor: Cesium.Color.WHITE,
+                outlineWidth: 2,
+                disableDepthTestDistance: 100000,
+                heightReference: Cesium.HeightReference.CLAMP_TO_GROUND // 贴地显示
+            },
+            // 监测范围圆（浅色透明度适中）
+            // 修复ellipse内部破碎：使用相对高度而不是CLAMP_TO_GROUND，避免采样不一致
+            ellipse: {
+                semiMajorAxis: radiusInMeters,
+                semiMinorAxis: radiusInMeters,
+                material: new Cesium.ColorMaterialProperty(
+                    new Cesium.Color(0.3, 0.5, 1.0, 0.3) // 浅蓝色，透明度0.3
+                ),
+                // 关键修复：移除outline，因为Cesium不支持在贴地ellipse上显示outline
+                outline: false, // 改为false，避免渲染冲突导致破碎
+                // 关键修复：使用相对高度而不是CLAMP_TO_GROUND，避免内部破碎
+                height: 0.1, // 稍微抬高0.1米，避免与地形冲突
+                heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND, // 改为相对地面高度，避免采样不一致
+                // 增加granularity精度，每0.25度一个点（更密集的采样）
+                granularity: Cesium.Math.PI / 720, // 每0.25度一个点，确保圆形完整不破碎
+                rotation: 0, // 确保圆形正对上方
+                // 设置足够的垂直分割线，确保圆形完整显示
+                numberOfVerticalLines: 128, // 增加到128，提供更多的垂直分割线
+                // 确保圆形始终可见
+                distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0.0, Number.POSITIVE_INFINITY),
+                shadows: Cesium.ShadowMode.DISABLED, // 禁用阴影避免遮挡
+                // 确保圆形完整渲染
+                stRotation: 0,
+                // 优化深度测试和渲染设置
+                disableDepthTestDistance: Number.POSITIVE_INFINITY, // 禁用深度测试，确保圆形完整显示
+                classificationType: Cesium.ClassificationType.TERRAIN // 明确指定分类类型为地形
+            },
+            // 关键修复4：使用polyline模拟圆形边框（因为ellipse的outline在terrain上不支持）
+            // 生成圆形边界的点来模拟边框效果
+            polyline: {
+                positions: new Cesium.CallbackProperty(function() {
+                    // 生成圆形边界的点数组
+                    const positions = [];
+                    const numPoints = 128; // 足够的点数确保圆形边框平滑
+                    const center = Cesium.Cartographic.fromDegrees(station.longitude, station.latitude);
+                    
+                    for (let i = 0; i <= numPoints; i++) {
+                        const angle = (i / numPoints) * Cesium.Math.TWO_PI;
+                        // 计算圆形边界上的点（考虑地球曲率）
+                        const lat = center.latitude + (radiusInMeters / 6378137) * Math.cos(angle);
+                        const lon = center.longitude + (radiusInMeters / (6378137 * Math.cos(center.latitude))) * Math.sin(angle);
+                        positions.push(Cesium.Cartesian3.fromRadians(lon, lat, 0));
+                    }
+                    return positions;
+                }, false),
+                width: 2,
+                material: new Cesium.Color(0.2, 0.4, 0.9, 0.6), // 蓝色边框，与原来的outlineColor一致
+                clampToGround: true, // 贴地显示
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
+                distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0.0, Number.POSITIVE_INFINITY),
+                shadows: Cesium.ShadowMode.DISABLED
+            }
+        });
+        
+        // 单独创建引导线实体，确保它始终显示
+        // 验证经纬度数据有效性
+        if (!station.longitude || !station.latitude || 
+            isNaN(station.longitude) || isNaN(station.latitude) ||
+            !isFinite(station.longitude) || !isFinite(station.latitude)) {
+            console.warn(`基站 ${station.stationId} 的经纬度数据无效，跳过引导线创建`);
+            baseStationEntities.set(entityId, entity);
+            return;
+        }
+        
+        // 预先计算引导线位置，避免CallbackProperty中的异步问题
+        const cartographic = Cesium.Cartographic.fromDegrees(
+            station.longitude, 
+            station.latitude
+        );
+        
+        // 获取实际地面高度（使用同步方法，如果失败则使用默认值）
+        let groundElevation = 0;
+        try {
+            const terrainHeight = viewer.scene.globe.getHeight(cartographic);
+            if (terrainHeight !== undefined && terrainHeight !== null && isFinite(terrainHeight)) {
+                groundElevation = terrainHeight;
+            }
+        } catch (e) {
+            console.warn(`基站 ${station.stationId} 获取地形高度失败，使用默认值0:`, e);
+        }
+        
+        // 起点：地面位置（稍微抬高一点，避免被地形遮挡）
+        const startPos = Cesium.Cartesian3.fromDegrees(
+            station.longitude, 
+            station.latitude, 
+            groundElevation + 1.0 // 抬高1米，确保不被地形遮挡
+        );
+        
+        // 终点：地面高度 + 标签高度（确保有足够的高度差）
+        const endPos = Cesium.Cartesian3.fromDegrees(
+            station.longitude, 
+            station.latitude, 
+            groundElevation + labelHeight
+        );
+        
+        // 验证起点和终点是否有效
+        if (!startPos || !endPos) {
+            console.warn(`基站 ${station.stationId} 的引导线位置计算失败`);
+            baseStationEntities.set(entityId, entity);
+            return;
+        }
+        
+        // 验证高度差是否足够（至少10米）
+        const heightDiff = labelHeight;
+        if (heightDiff < 10) {
+            console.warn(`基站 ${station.stationId} 的引导线高度差过小: ${heightDiff}米`);
+        }
+        
+        // 不再创建基站标签的引导线（已删除）
+        
+        // 添加标签到主实体
+        entity.label = {
+            text: `基站${station.stationId}`,
+            font: '14px sans-serif',
+            fillColor: Cesium.Color.WHITE,
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 2,
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            pixelOffset: new Cesium.Cartesian2(0, -labelOffset),
+            disableDepthTestDistance: 100000,
+            heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND, // 相对地面高度
+            verticalOrigin: Cesium.VerticalOrigin.BOTTOM, // 标签底部对齐引导线
+            distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0.0, 100000.0) // 确保标签在可见范围内
+        };
+        
+        baseStationEntities.set(entityId, entity);
+    }
+    
+    // 调试函数：检查所有引导线的状态
+    function debugBaseStationPolylines() {
+        console.log('=== 基站引导线调试信息 ===');
+        let total = 0;
+        let valid = 0;
+        let invalid = [];
+        
+        baseStationEntities.forEach((entity, key) => {
+            if (key.endsWith('_polyline')) {
+                total++;
+                const actualEntity = viewer.entities.getById(key);
+                if (actualEntity && actualEntity.polyline) {
+                    const polyline = actualEntity.polyline;
+                    const show = polyline.show;
+                    let showValue = true;
+                    
+                    if (show instanceof Cesium.CallbackProperty) {
+                        try {
+                            showValue = show.getValue();
+                        } catch (e) {
+                            showValue = true;
+                        }
+                    } else {
+                        showValue = show !== false;
+                    }
+                    
+                    // 验证positions是否有效（正确处理Property对象）
+                    let positionsValid = false;
+                    try {
+                        const positions = polyline.positions;
+                        if (positions) {
+                            if (typeof positions.getValue === 'function') {
+                                // 是Property对象，获取实际值
+                                const positionsArray = positions.getValue();
+                                positionsValid = Array.isArray(positionsArray) && positionsArray.length === 2;
+                            } else if (Array.isArray(positions)) {
+                                // 直接是数组
+                                positionsValid = positions.length === 2;
+                            }
+                        }
+                    } catch (e) {
+                        // 忽略错误
+                    }
+                    
+                    if (showValue && positionsValid) {
+                        valid++;
+                    } else {
+                        invalid.push({
+                            key: key,
+                            show: showValue,
+                            hasPositions: !!polyline.positions,
+                            positionsValid: positionsValid
+                        });
+                    }
+                } else {
+                    invalid.push({
+                        key: key,
+                        reason: '实体未找到或polyline属性不存在'
+                    });
+                }
+            }
+        });
+        
+        console.log(`总计: ${total} 条引导线`);
+        console.log(`有效: ${valid} 条`);
+        console.log(`无效: ${invalid.length} 条`);
+        if (invalid.length > 0) {
+            console.log('无效的引导线:', invalid);
+        }
+        console.log('========================');
+    }
+    
+    // 将调试函数暴露到全局，方便在控制台调用
+    window.debugBaseStationPolylines = debugBaseStationPolylines;
+    
+    // 增强的诊断和修复函数
+    function diagnoseAndFixPolylines() {
+        console.log('=== 引导线诊断和修复 ===');
+        let issues = [];
+        let fixed = 0;
+        
+        baseStationEntities.forEach((entity, key) => {
+            if (key.endsWith('_polyline')) {
+                const actualEntity = viewer.entities.getById(key);
+                if (!actualEntity) {
+                    issues.push({key: key, issue: '实体不存在'});
+                    return;
+                }
+                
+                if (!actualEntity.polyline) {
+                    issues.push({key: key, issue: 'polyline属性不存在'});
+                    return;
+                }
+                
+                const polyline = actualEntity.polyline;
+                const stationId = key.replace('basestation_', '').replace('_polyline', '');
+                
+                // 检查1: show属性
+                let showValue = true;
+                try {
+                    if (polyline.show && typeof polyline.show.getValue === 'function') {
+                        showValue = polyline.show.getValue();
+                    } else {
+                        showValue = polyline.show !== false;
+                    }
+                } catch (e) {
+                    showValue = true;
+                }
+                
+                if (!showValue) {
+                    issues.push({key: key, stationId: stationId, issue: 'show为false'});
+                    polyline.show = true;
+                    fixed++;
+                }
+                
+                // 检查2: positions
+                let positionsArray = null;
+                try {
+                    if (polyline.positions) {
+                        if (typeof polyline.positions.getValue === 'function') {
+                            positionsArray = polyline.positions.getValue();
+                        } else if (Array.isArray(polyline.positions)) {
+                            positionsArray = polyline.positions;
+                        }
+                    }
+                } catch (e) {
+                    issues.push({key: key, stationId: stationId, issue: 'positions获取失败: ' + e.message});
+                }
+                
+                if (!positionsArray || !Array.isArray(positionsArray) || positionsArray.length !== 2) {
+                    issues.push({key: key, stationId: stationId, issue: 'positions无效', positions: positionsArray});
+                } else {
+                    // 检查3: 距离
+                    try {
+                        const pos1 = positionsArray[0];
+                        const pos2 = positionsArray[1];
+                        if (pos1 && pos2) {
+                            const distance = Cesium.Cartesian3.distance(pos1, pos2);
+                            if (distance < 1.0) {
+                                issues.push({key: key, stationId: stationId, issue: `距离过近: ${distance.toFixed(2)}米`});
+                            }
+                            
+                            // 检查位置是否有效（不是NaN或Infinity）
+                            const cart1 = Cesium.Cartographic.fromCartesian(pos1);
+                            const cart2 = Cesium.Cartographic.fromCartesian(pos2);
+                            
+                            if (isNaN(cart1.longitude) || isNaN(cart1.latitude) || 
+                                isNaN(cart2.longitude) || isNaN(cart2.latitude)) {
+                                issues.push({key: key, stationId: stationId, issue: '位置包含NaN值'});
+                            }
+                        }
+                    } catch (e) {
+                        issues.push({key: key, stationId: stationId, issue: '距离计算失败: ' + e.message});
+                    }
+                }
+                
+                // 检查4: 材质
+                if (!polyline.material) {
+                    issues.push({key: key, stationId: stationId, issue: '材质不存在'});
+                    polyline.material = Cesium.Color.YELLOW.withAlpha(0.9);
+                    fixed++;
+                }
+                
+                // 检查5: 线宽
+                if (!polyline.width || polyline.width < 1.0) {
+                    issues.push({key: key, stationId: stationId, issue: '线宽过小: ' + polyline.width});
+                    polyline.width = 3.0;
+                    fixed++;
+                }
+                
+                // 强制设置关键属性
+                polyline.disableDepthTestDistance = Number.POSITIVE_INFINITY;
+                polyline.show = true;
+                polyline.clampToGround = false;
+            }
+        });
+        
+        // 强制重新渲染
+        viewer.scene.requestRender();
+        
+        console.log(`发现问题: ${issues.length} 个`);
+        console.log(`已修复: ${fixed} 个`);
+        if (issues.length > 0) {
+            console.log('问题详情:', issues);
+        }
+        console.log('========================');
+        
+        return {issues: issues, fixed: fixed};
+    }
+    
+    // 暴露诊断函数
+    window.diagnoseAndFixPolylines = diagnoseAndFixPolylines;
+    
+    // 测试函数：创建一个测试引导线，验证基本功能
+    function testPolyline() {
+        console.log('=== 创建测试引导线 ===');
+        const testPos1 = Cesium.Cartesian3.fromDegrees(114.04, 30.85, 0);
+        const testPos2 = Cesium.Cartesian3.fromDegrees(114.04, 30.85, 100);
+        
+        const testEntity = viewer.entities.add({
+            id: 'test_polyline',
+            name: '测试引导线',
+            polyline: {
+                positions: [testPos1, testPos2],
+                width: 5.0,
+                material: Cesium.Color.RED.withAlpha(1.0),
+                clampToGround: false,
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
+                show: true
+            }
+        });
+        
+        console.log('测试引导线已创建，应该看到一条红色粗线');
+        console.log('如果看不到，说明是Cesium渲染问题');
+        console.log('5秒后自动删除测试引导线');
+        
+        setTimeout(() => {
+            viewer.entities.remove(testEntity);
+            console.log('测试引导线已删除');
+        }, 5000);
+    }
+    
+    window.testPolyline = testPolyline;
+    
+    // 测试函数：创建一个测试基站圆形，验证基本功能
+    function testBaseStationCircle() {
+        console.log('=== 创建测试基站圆形 ===');
+        const testPos = Cesium.Cartesian3.fromDegrees(114.04, 30.85, 0);
+        const radius = 100; // 100米半径
+        
+        const testEntity = viewer.entities.add({
+            id: 'test_base_station_circle',
+            name: '测试基站圆形',
+            position: testPos,
+            ellipse: {
+                semiMajorAxis: radius,
+                semiMinorAxis: radius,
+                material: Cesium.Color.RED.withAlpha(0.5),
+                outline: true,
+                outlineColor: Cesium.Color.RED,
+                outlineWidth: 3,
+                height: 0,
+                extrudedHeight: 0,
+                heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+                granularity: Cesium.Math.PI / 32,
+                rotation: 0,
+                numberOfVerticalLines: 32,
+                distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0.0, Number.POSITIVE_INFINITY),
+                shadows: Cesium.ShadowMode.DISABLED
+            },
+            point: {
+                pixelSize: 15,
+                color: Cesium.Color.RED,
+                outlineColor: Cesium.Color.WHITE,
+                outlineWidth: 2,
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
+                heightReference: Cesium.HeightReference.CLAMP_TO_GROUND
+            }
+        });
+        
+        console.log('测试基站圆形已创建，应该看到一个红色圆形');
+        console.log('如果看不到完整的圆形，说明ellipse配置有问题');
+        console.log('10秒后自动删除测试圆形');
+        
+        setTimeout(() => {
+            viewer.entities.remove(testEntity);
+            console.log('测试基站圆形已删除');
+        }, 10000);
+    }
+    
+    window.testBaseStationCircle = testBaseStationCircle;
+    
+    // 强制修复所有基站圆形
+    function fixAllBaseStations() {
+        console.log('=== 修复所有基站圆形 ===');
+        let ellipseFixed = 0;
+        
+        baseStationEntities.forEach((entity, key) => {
+            // 修复基站圆形
+            const actualEntity = viewer.entities.getById(key);
+            if (actualEntity && actualEntity.ellipse) {
+                try {
+                    // 应用所有修复：确保圆形完整显示（不是多边形，不破碎）
+                    actualEntity.ellipse.outline = false; // 修复1：移除outline
+                    actualEntity.ellipse.granularity = Cesium.Math.PI / 720; // 修复2：每0.25度一个点
+                    actualEntity.ellipse.numberOfVerticalLines = 128; // 修复3：设置足够的垂直分割线（增加到128）
+                    actualEntity.ellipse.height = 0.1; // 修复：稍微抬高0.1米
+                    actualEntity.ellipse.heightReference = Cesium.HeightReference.RELATIVE_TO_GROUND; // 关键修复：使用相对高度而不是CLAMP_TO_GROUND
+                    actualEntity.ellipse.distanceDisplayCondition = new Cesium.DistanceDisplayCondition(0.0, Number.POSITIVE_INFINITY);
+                    actualEntity.ellipse.shadows = Cesium.ShadowMode.DISABLED;
+                    actualEntity.ellipse.stRotation = 0;
+                    actualEntity.ellipse.disableDepthTestDistance = Number.POSITIVE_INFINITY; // 修复5：禁用深度测试
+                    actualEntity.ellipse.classificationType = Cesium.ClassificationType.TERRAIN; // 修复5：明确指定分类类型
+                    ellipseFixed++;
+                } catch (e) {
+                    console.error(`修复基站 ${key} 圆形失败:`, e);
+                }
+            }
+        });
+        
+        // 强制重新渲染
+        viewer.scene.requestRender();
+        
+        console.log(`修复完成: 圆形 ${ellipseFixed} 个`);
+        console.log('========================');
+    }
+    
+    window.fixAllBaseStations = fixAllBaseStations;
+    
+    // 一键测试所有功能
+    function testAll() {
+        console.log('=== 开始全面测试 ===');
+        console.log('1. 测试引导线...');
+        testPolyline();
+        
+        setTimeout(() => {
+            console.log('2. 测试基站圆形...');
+            testBaseStationCircle();
+        }, 6000);
+        
+        setTimeout(() => {
+            console.log('3. 诊断所有引导线...');
+            if (typeof diagnoseAndFixPolylines === 'function') {
+                diagnoseAndFixPolylines();
+            }
+        }, 16000);
+    }
+    
+    window.testAll = testAll;
+
+    // 清理资源
+    window.addEventListener('beforeunload', () => {
+        clearInterval(updateInterval);
+        viewer.destroy();
+    });
 </script>
-</body>
 <style>
-    #infoBox {
+    #infoPanel {
         position: absolute;
         top: 20px;
         left: 20px;
         z-index: 1000;
-        background: rgba(40, 40, 40, 0.7);
+        background: rgba(40, 40, 40, 0.85);
         color: white;
         padding: 15px;
-        border-radius: 5px;
-        font-family: sans-serif;
-        line-height: 1.5;
+        border-radius: 8px;
+        font-family: 'Segoe UI', sans-serif;
+        line-height: 1.6;
+        min-width: 300px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        border: 1px solid #3a3a3a;
+        transition: all 0.3s ease;
     }
-    #infoBox div {
-        margin: 5px 0;
+
+    #panelHeader {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding-bottom: 10px;
+        margin-bottom: 10px;
+        border-bottom: 1px solid #555;
+        cursor: pointer;
+    }
+
+    #toggleBtn {
+        background: none;
+        border: none;
+        color: #5a80b5;
+        cursor: pointer;
+        font-size: 16px;
+        padding: 0 5px;
+    }
+
+    #toggleBtn:hover {
+        color: #7ea0d5;
+    }
+
+    #panelContent {
+        display: block;
+    }
+
+    #infoPanel div {
+        margin: 8px 0;
+    }
+
+    #status {
+        font-size: 0.9em;
+        padding: 6px 10px;
+        background: rgba(50, 50, 50, 0.7);
+        border-radius: 4px;
+        margin-top: 12px;
+    }
+
+    #status.error {
+        background: rgba(180, 30, 30, 0.7);
+    }
+
+    .control-group {
+        margin-top: 15px;
+        padding-top: 15px;
+        border-top: 1px solid #555;
+    }
+
+    label {
+        display: block;
+        margin-bottom: 6px;
+        font-weight: bold;
+    }
+
+    select {
+        width: 100%;
+        padding: 8px;
+        background: rgba(30, 30, 30, 0.9);
+        color: white;
+        border: 1px solid #555;
+        border-radius: 4px;
+    }
+/*java -jar /home/ljj/toshow-0.0.1-SNAPSHOT.jar  --server.port=33369 --server.broker=192.168.0.5:9092   --kafka.brokers=192.168.0.5:9092  --kafka.topics=plateFiber1,plateFiber2,plateFiber3,plateFiber4,plateFiber5,plateFiber6,plateFiber7,plateFiber8,plateFiber9,plateFiber10,plateFiber11*/
+    button {
+        margin-top: 10px;
+        padding: 8px 12px;
+        width: 100%;
+        background: #4a6fa5;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+
+    button:hover {
+        background: #5a80b5;
+    }
+
+    button#reconnectBtn {
+        background: #4a9d5a;
+    }
+
+    button#reconnectBtn:hover {
+        background: #5ab56a;
     }
 </style>
+</body>
 </html>
+
+

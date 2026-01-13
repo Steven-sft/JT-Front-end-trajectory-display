@@ -5,7 +5,7 @@ import com.ljj.toshow.demos.pojo.*;
 import com.ljj.toshow.demos.service.HBaseService;
 import com.ljj.toshow.demos.tools.JsonReader;
 import com.ljj.toshow.demos.tools.hbaseTool;
-import javafx.util.Pair;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.*;
 import org.springframework.stereotype.Service;

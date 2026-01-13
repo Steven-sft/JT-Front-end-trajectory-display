@@ -12,7 +12,9 @@ import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.Serializable;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.*;
@@ -313,7 +315,19 @@ public class TrafficEventUtils {
 
         private String readFileContent(String filePath) {
             try {
-                // 使用 Files.readAllBytes 方法读取文件内容
+                // 首先尝试从 classpath 读取
+                InputStream inputStream = getClass().getClassLoader().getResourceAsStream(filePath);
+                if (inputStream != null) {
+                    byte[] buffer = new byte[8192];
+                    StringBuilder sb = new StringBuilder();
+                    int bytesRead;
+                    while ((bytesRead = inputStream.read(buffer)) != -1) {
+                        sb.append(new String(buffer, 0, bytesRead, StandardCharsets.UTF_8));
+                    }
+                    inputStream.close();
+                    return sb.toString();
+                }
+                // 如果 classpath 中不存在，则从文件系统读取
                 byte[] bytes = Files.readAllBytes(Paths.get(filePath));
                 return new String(bytes);
             } catch (IOException e) {
@@ -374,7 +388,19 @@ public class TrafficEventUtils {
 
         private String readFileContent(String filePath) {
             try {
-                // 使用 Files.readAllBytes 方法读取文件内容
+                // 首先尝试从 classpath 读取
+                InputStream inputStream = getClass().getClassLoader().getResourceAsStream(filePath);
+                if (inputStream != null) {
+                    byte[] buffer = new byte[8192];
+                    StringBuilder sb = new StringBuilder();
+                    int bytesRead;
+                    while ((bytesRead = inputStream.read(buffer)) != -1) {
+                        sb.append(new String(buffer, 0, bytesRead, StandardCharsets.UTF_8));
+                    }
+                    inputStream.close();
+                    return sb.toString();
+                }
+                // 如果 classpath 中不存在，则从文件系统读取
                 byte[] bytes = Files.readAllBytes(Paths.get(filePath));
                 return new String(bytes);
             } catch (IOException e) {
