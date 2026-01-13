@@ -562,8 +562,8 @@
         return hash;
     }
     
-    // 标签避让算法：基于屏幕空间的碰撞检测和动态调整
-    // 将标签投影到屏幕坐标，检测屏幕上的矩形重叠，避免标签在屏幕上重叠显示
+    // 标签和轨迹点避让算法：基于屏幕空间的碰撞检测和动态调整
+    // 将标签和轨迹点投影到屏幕坐标，检测屏幕上的重叠，避免在屏幕上重叠显示
     function avoidLabelOverlap() {
         try {
             // 检查是否有车辆数据
@@ -576,14 +576,14 @@
                 return;
             }
             
-            // 1. 收集所有标签的屏幕坐标和边界框
-            const labelInfos = [];
+            // 1. 收集所有实体的完整边界框（轨迹点+引导线+标签）
+            const entityInfos = [];
             
             vehicleEntities.forEach((entity, entityId) => {
                 if (!entity.label || !entity.position) return;
                 
                 try {
-                    // 获取车辆的世界坐标位置
+                    // 获取车辆的世界坐标位置（轨迹点位置）
                     const vehicleWorldPos = entity.position.getValue();
                     if (!vehicleWorldPos) return;
                     
@@ -613,61 +613,105 @@
                     const labelWorldPos = Cesium.Cartesian3.add(vehicleWorldPos, worldOffset, new Cesium.Cartesian3());
                     
                     // 投影到屏幕坐标
-                    const screenPos = Cesium.SceneTransforms.wgs84ToWindowCoordinates(viewer.scene, labelWorldPos);
-                    if (!screenPos) return;
+                    const pointScreenPos = Cesium.SceneTransforms.wgs84ToWindowCoordinates(viewer.scene, vehicleWorldPos);
+                    const labelScreenPos = Cesium.SceneTransforms.wgs84ToWindowCoordinates(viewer.scene, labelWorldPos);
+                    if (!pointScreenPos || !labelScreenPos) return;
                     
-                    // 估算标签的屏幕边界框（需要根据实际标签大小调整）
-                    const labelWidth = 120;  // 标签宽度（像素）
-                    const labelHeight = 40;  // 标签高度（像素）
-                    const padding = 5;       // 额外间距（像素）
+                    // 获取点的像素大小
+                    let pixelSize = 6;
+                    if (entity.point && entity.point.pixelSize) {
+                        if (typeof entity.point.pixelSize === 'number') {
+                            pixelSize = entity.point.pixelSize;
+                        } else if (entity.point.pixelSize.getValue) {
+                            pixelSize = entity.point.pixelSize.getValue();
+                        }
+                    }
                     
-                    const screenRect = {
-                        left: screenPos.x - labelWidth / 2 - padding,
-                        right: screenPos.x + labelWidth / 2 + padding,
-                        top: screenPos.y - labelHeight / 2 - padding,
-                        bottom: screenPos.y + labelHeight / 2 + padding,
-                        centerX: screenPos.x,
-                        centerY: screenPos.y
+                    // 计算轨迹点的屏幕边界框
+                    const pointRadius = pixelSize / 2;
+                    const pointPadding = 3;
+                    const pointRect = {
+                        left: pointScreenPos.x - pointRadius - pointPadding,
+                        right: pointScreenPos.x + pointRadius + pointPadding,
+                        top: pointScreenPos.y - pointRadius - pointPadding,
+                        bottom: pointScreenPos.y + pointRadius + pointPadding
                     };
                     
-                    labelInfos.push({
+                    // 计算标签的屏幕边界框
+                    const labelWidth = 120;  // 标签宽度（像素）
+                    const labelHeight = 40;  // 标签高度（像素）
+                    const labelPadding = 5;  // 额外间距（像素）
+                    const labelRect = {
+                        left: labelScreenPos.x - labelWidth / 2 - labelPadding,
+                        right: labelScreenPos.x + labelWidth / 2 + labelPadding,
+                        top: labelScreenPos.y - labelHeight / 2 - labelPadding,
+                        bottom: labelScreenPos.y + labelHeight / 2 + labelPadding
+                    };
+                    
+                    // 计算引导线的屏幕边界框（起点和终点之间的矩形）
+                    // 引导线宽度约为3像素，需要考虑线宽
+                    const lineWidth = 3;
+                    const linePadding = 2;
+                    const lineRect = {
+                        left: Math.min(pointScreenPos.x, labelScreenPos.x) - lineWidth / 2 - linePadding,
+                        right: Math.max(pointScreenPos.x, labelScreenPos.x) + lineWidth / 2 + linePadding,
+                        top: Math.min(pointScreenPos.y, labelScreenPos.y) - lineWidth / 2 - linePadding,
+                        bottom: Math.max(pointScreenPos.y, labelScreenPos.y) + lineWidth / 2 + linePadding
+                    };
+                    
+                    // 合并三个边界框，得到完整的实体边界框
+                    const combinedRect = {
+                        left: Math.min(pointRect.left, labelRect.left, lineRect.left),
+                        right: Math.max(pointRect.right, labelRect.right, lineRect.right),
+                        top: Math.min(pointRect.top, labelRect.top, lineRect.top),
+                        bottom: Math.max(pointRect.bottom, labelRect.bottom, lineRect.bottom),
+                        centerX: (Math.min(pointRect.left, labelRect.left, lineRect.left) + 
+                                 Math.max(pointRect.right, labelRect.right, lineRect.right)) / 2,
+                        centerY: (Math.min(pointRect.top, labelRect.top, lineRect.top) + 
+                                 Math.max(pointRect.bottom, labelRect.bottom, lineRect.bottom)) / 2
+                    };
+                    
+                    entityInfos.push({
                         entity: entity,
                         entityId: entityId,
                         vehiclePos: vehicleWorldPos,
                         labelWorldPos: labelWorldPos,
                         eyeOffset: eyeOffset,
-                        screenPos: screenPos,
-                        screenRect: screenRect
+                        pointScreenPos: pointScreenPos,
+                        labelScreenPos: labelScreenPos,
+                        screenRect: combinedRect,  // 使用合并后的完整边界框
+                        pixelSize: pixelSize
                     });
                 } catch (e) {
-                    // 忽略单个标签的错误
+                    // 忽略单个实体的错误
+                    console.warn(`[避让算法] 收集实体 ${entityId} 信息失败:`, e);
                 }
             });
             
-            // 2. 检测屏幕空间重叠并调整（多标签避让 + 切换布局方向策略）
-            const minSeparation = 250; // 最小分离距离（像素）- 增加到250像素，让标签更松散
-            const preferredSeparation = 300; // 首选分离距离（像素）- 理想情况下标签应该保持这个距离
+            // 2. 检测屏幕空间重叠并调整（基于完整边界框：轨迹点+引导线+标签）
+            const minSeparation = 250; // 最小分离距离（像素）
+            const preferredSeparation = 300; // 首选分离距离（像素）
             
-            // 调试：输出检测到的标签数量
-            if (labelInfos.length > 0) {
-                console.log(`[避让算法] 检测到 ${labelInfos.length} 个标签`);
+            // 调试：输出检测到的数量
+            if (entityInfos.length > 0) {
+                console.log(`[避让算法] 检测到 ${entityInfos.length} 个实体（轨迹点+引导线+标签）`);
             }
             
-            // 存储需要避让的标签（修改：每对重叠标签中，只让一个避让）
-            const labelsToAvoid = new Set();
-            // 存储固定不变的标签（每对重叠标签中，ID较小的保持固定）
-            const fixedLabels = new Set();
-            // 存储每个标签的重叠信息，用于更智能的避让决策
+            // 存储需要避让的实体（修改：每对重叠实体中，只让一个避让）
+            const entitiesToAvoid = new Set();
+            // 存储固定不变的实体（每对重叠实体中，ID较小的保持固定）
+            const fixedEntities = new Set();
+            // 存储每个实体的重叠信息，用于更智能的避让决策
             const overlapInfo = new Map(); // entityId -> { overlaps: Set<entityId>, minDistance: number }
             
-            // 存储每个标签的避让状态，避免频繁切换布局
+            // 存储每个实体的避让状态，避免频繁切换布局
             const avoidanceState = new Map(); // entityId -> { lastAvoidanceTime, lastLayout }
             
-            // 检测重叠和距离
-            for (let i = 0; i < labelInfos.length; i++) {
-                for (let j = i + 1; j < labelInfos.length; j++) {
-                    const info1 = labelInfos[i];
-                    const info2 = labelInfos[j];
+            // 检测实体之间的重叠（基于完整边界框）
+            for (let i = 0; i < entityInfos.length; i++) {
+                for (let j = i + 1; j < entityInfos.length; j++) {
+                    const info1 = entityInfos[i];
+                    const info2 = entityInfos[j];
                     
                     // 计算分离向量（屏幕空间）
                     const dx = info2.screenRect.centerX - info1.screenRect.centerX;
@@ -692,36 +736,35 @@
                         overlapInfo.get(key1).minDistance = Math.min(overlapInfo.get(key1).minDistance, distance);
                         overlapInfo.get(key2).minDistance = Math.min(overlapInfo.get(key2).minDistance, distance);
                         
-                        // 修改：重叠的两个标签中，固定一个不变，只让另一个避让
-                        // 策略：选择ID较大的标签进行避让，ID较小的标签保持不变
-                        // 这样可以确保每对重叠标签中，总是有一个保持稳定
-                        // 选择ID较大的标签进行避让，ID较小的保持不变
+                        // 重叠的两个实体中，固定一个不变，只让另一个避让
+                        // 策略：选择ID较大的实体进行避让，ID较小的实体保持不变
+                        // 这样可以确保每对重叠实体中，总是有一个保持稳定
                         const avoidEntityId = key1 > key2 ? key1 : key2;
                         const fixedEntityId = key1 > key2 ? key2 : key1;
                         
-                        // 标记固定标签（如果该标签已经在避让列表中，需要移除）
-                        fixedLabels.add(fixedEntityId);
-                        if (labelsToAvoid.has(fixedEntityId)) {
-                            labelsToAvoid.delete(fixedEntityId);
+                        // 标记固定实体（如果该实体已经在避让列表中，需要移除）
+                        fixedEntities.add(fixedEntityId);
+                        if (entitiesToAvoid.has(fixedEntityId)) {
+                            entitiesToAvoid.delete(fixedEntityId);
                         }
                         
-                        // 只让ID较大的标签避让（但如果它已经被标记为固定，则跳过）
-                        if (!fixedLabels.has(avoidEntityId)) {
-                            labelsToAvoid.add(avoidEntityId);
+                        // 只让ID较大的实体避让（但如果它已经被标记为固定，则跳过）
+                        if (!fixedEntities.has(avoidEntityId)) {
+                            entitiesToAvoid.add(avoidEntityId);
                         }
                         
-                        console.log(`[避让决策] 标签 ${fixedEntityId} 保持固定，标签 ${avoidEntityId} 进行避让`);
+                        console.log(`[避让决策] 实体 ${fixedEntityId} 保持固定，实体 ${avoidEntityId} 进行避让`);
                         // 调试：输出重叠信息
-                        console.log(`[避让检测] 标签 ${key1} 和 ${key2} 重叠/过近，距离 ${distance.toFixed(1)} 像素`);
+                        console.log(`[避让检测] 实体 ${key1} 和 ${key2} 重叠/过近，距离 ${distance.toFixed(1)} 像素`);
                     }
                 }
             }
             
-            // 调试：输出需要避让的标签数量
-            console.log(`[避让算法] 检测到 ${labelsToAvoid.size} 个标签需要避让:`, Array.from(labelsToAvoid));
+            // 调试：输出需要避让的数量
+            console.log(`[避让算法] 检测到 ${entitiesToAvoid.size} 个实体需要避让:`, Array.from(entitiesToAvoid));
             
-            // 3. 对需要避让的标签切换布局方向
-            labelsToAvoid.forEach((entityId) => {
+            // 3. 对需要避让的实体切换布局方向（调整标签位置，从而改变整个实体的边界框）
+            entitiesToAvoid.forEach((entityId) => {
                 try {
                     const entity = vehicleEntities.get(entityId);
                     if (!entity) return;
@@ -738,10 +781,10 @@
                     const now = Date.now();
                     if (lastState && (now - lastState.lastAvoidanceTime < 1500)) {
                         // 最近避让过，但如果当前布局仍然有重叠，仍然需要避让
-                        const currentInfo = labelInfos.find(info => info.entityId === entityId);
+                        const currentInfo = entityInfos.find(info => info.entityId === entityId);
                         if (currentInfo) {
                             let hasOverlap = false;
-                            for (const otherInfo of labelInfos) {
+                            for (const otherInfo of entityInfos) {
                                 if (otherInfo.entityId === entityId) continue;
                                 if (isRectOverlap(currentInfo.screenRect, otherInfo.screenRect)) {
                                     hasOverlap = true;
@@ -773,13 +816,13 @@
                                 let minOverlaps = Infinity;
                                 let bestAvgDistance = 0;
                                 
-                                // 先计算当前布局的评分
-                                const currentInfo = labelInfos.find(info => info.entityId === entityId);
+                                // 先计算当前布局的评分（使用完整边界框）
+                                const currentInfo = entityInfos.find(info => info.entityId === entityId);
                                 if (currentInfo) {
                                     let currentOverlaps = 0;
                                     let currentTotalDist = 0;
                                     let currentNeighborCount = 0;
-                                    for (const otherInfo of labelInfos) {
+                                    for (const otherInfo of entityInfos) {
                                         if (otherInfo.entityId === entityId) continue;
                                         if (isRectOverlap(currentInfo.screenRect, otherInfo.screenRect)) {
                                             currentOverlaps++;
@@ -807,64 +850,93 @@
                                     );
                                     const testLabelWorldPos = Cesium.Cartesian3.add(vehiclePosition, worldOffset, new Cesium.Cartesian3());
                                     
-                                    // 投影到屏幕坐标
-                                    const testScreenPos = Cesium.SceneTransforms.wgs84ToWindowCoordinates(viewer.scene, testLabelWorldPos);
-                                    if (!testScreenPos) continue;
+                                    // 投影到屏幕坐标（轨迹点和标签）
+                                    const testPointScreenPos = Cesium.SceneTransforms.wgs84ToWindowCoordinates(viewer.scene, vehiclePosition);
+                                    const testLabelScreenPos = Cesium.SceneTransforms.wgs84ToWindowCoordinates(viewer.scene, testLabelWorldPos);
+                                    if (!testPointScreenPos || !testLabelScreenPos) continue;
                                     
-                                    // 计算屏幕矩形
-                                    const labelWidth = 120;
-                                    const labelHeight = 40;
-                                    const padding = 5;
-                                    const testScreenRect = {
-                                        left: testScreenPos.x - labelWidth / 2 - padding,
-                                        right: testScreenPos.x + labelWidth / 2 + padding,
-                                        top: testScreenPos.y - labelHeight / 2 - padding,
-                                        bottom: testScreenPos.y + labelHeight / 2 + padding,
-                                        centerX: testScreenPos.x,
-                                        centerY: testScreenPos.y
+                                    // 获取当前实体的点信息
+                                    const currentEntityInfo = entityInfos.find(info => info.entityId === entityId);
+                                    const pixelSize = currentEntityInfo ? currentEntityInfo.pixelSize : 6;
+                                    
+                                    // 计算轨迹点的屏幕边界框
+                                    const pointRadius = pixelSize / 2;
+                                    const pointPadding = 3;
+                                    const testPointRect = {
+                                        left: testPointScreenPos.x - pointRadius - pointPadding,
+                                        right: testPointScreenPos.x + pointRadius + pointPadding,
+                                        top: testPointScreenPos.y - pointRadius - pointPadding,
+                                        bottom: testPointScreenPos.y + pointRadius + pointPadding
                                     };
                                     
-                                    // 计算与其他标签的重叠数量和平均距离
-                                    let overlapCount = 0;
-                                    let totalDistance = 0;
-                                    let neighborCount = 0;
-                                    let minDistance = Infinity;
+                                    // 计算标签的屏幕边界框
+                                    const labelWidth = 120;
+                                    const labelHeight = 40;
+                                    const labelPadding = 5;
+                                    const testLabelRect = {
+                                        left: testLabelScreenPos.x - labelWidth / 2 - labelPadding,
+                                        right: testLabelScreenPos.x + labelWidth / 2 + labelPadding,
+                                        top: testLabelScreenPos.y - labelHeight / 2 - labelPadding,
+                                        bottom: testLabelScreenPos.y + labelHeight / 2 + labelPadding
+                                    };
                                     
-                                    for (const otherInfo of labelInfos) {
-                                        if (otherInfo.entityId === entityId) continue; // 跳过自己
-                                        
-                                        // 计算屏幕距离
+                                    // 计算引导线的屏幕边界框
+                                    const lineWidth = 3;
+                                    const linePadding = 2;
+                                    const testLineRect = {
+                                        left: Math.min(testPointScreenPos.x, testLabelScreenPos.x) - lineWidth / 2 - linePadding,
+                                        right: Math.max(testPointScreenPos.x, testLabelScreenPos.x) + lineWidth / 2 + linePadding,
+                                        top: Math.min(testPointScreenPos.y, testLabelScreenPos.y) - lineWidth / 2 - linePadding,
+                                        bottom: Math.max(testPointScreenPos.y, testLabelScreenPos.y) + lineWidth / 2 + linePadding
+                                    };
+                                    
+                                    // 合并三个边界框，得到完整的测试边界框
+                                    const testScreenRect = {
+                                        left: Math.min(testPointRect.left, testLabelRect.left, testLineRect.left),
+                                        right: Math.max(testPointRect.right, testLabelRect.right, testLineRect.right),
+                                        top: Math.min(testPointRect.top, testLabelRect.top, testLineRect.top),
+                                        bottom: Math.max(testPointRect.bottom, testLabelRect.bottom, testLineRect.bottom),
+                                        centerX: (Math.min(testPointRect.left, testLabelRect.left, testLineRect.left) + 
+                                                 Math.max(testPointRect.right, testLabelRect.right, testLineRect.right)) / 2,
+                                        centerY: (Math.min(testPointRect.top, testLabelRect.top, testLineRect.top) + 
+                                                 Math.max(testPointRect.bottom, testLabelRect.bottom, testLineRect.bottom)) / 2
+                                    };
+                                    
+                                    // 计算与其他实体的重叠数（使用完整边界框）
+                                    let testOverlaps = 0;
+                                    let testTotalDist = 0;
+                                    let testNeighborCount = 0;
+                                    
+                                    // 检查与其他实体的重叠
+                                    for (const otherInfo of entityInfos) {
+                                        if (otherInfo.entityId === entityId) continue;
+                                        if (isRectOverlap(testScreenRect, otherInfo.screenRect)) {
+                                            testOverlaps++;
+                                        }
                                         const dx = testScreenRect.centerX - otherInfo.screenRect.centerX;
                                         const dy = testScreenRect.centerY - otherInfo.screenRect.centerY;
-                                        const distance = Math.sqrt(dx * dx + dy * dy);
-                                        
-                                        if (isRectOverlap(testScreenRect, otherInfo.screenRect)) {
-                                            overlapCount++;
-                                        }
-                                        
-                                        // 记录距离信息（用于选择更松散的布局）
-                                        totalDistance += distance;
-                                        neighborCount++;
-                                        minDistance = Math.min(minDistance, distance);
+                                        const dist = Math.sqrt(dx * dx + dy * dy);
+                                        testTotalDist += dist;
+                                        testNeighborCount++;
                                     }
                                     
                                     // 计算平均距离
-                                    const avgDistance = neighborCount > 0 ? totalDistance / neighborCount : 0;
+                                    const avgDistance = testNeighborCount > 0 ? testTotalDist / testNeighborCount : 0;
                                     
                                     // 优化布局选择策略：
-                                    // 1. 优先选择重叠最少的布局
+                                    // 1. 优先选择重叠最少的布局（包括与标签和点的重叠）
                                     // 2. 如果重叠数量相同，选择平均距离最远的布局（实现更松散的分布）
                                     let isBetter = false;
-                                    if (overlapCount < minOverlaps) {
+                                    if (testOverlaps < minOverlaps) {
                                         // 重叠更少，直接选择
                                         isBetter = true;
-                                    } else if (overlapCount === minOverlaps && avgDistance > bestAvgDistance) {
+                                    } else if (testOverlaps === minOverlaps && avgDistance > bestAvgDistance) {
                                         // 重叠数量相同，但平均距离更远，选择它（实现更松散的分布）
                                         isBetter = true;
                                     }
                                     
                                     if (isBetter) {
-                                        minOverlaps = overlapCount;
+                                        minOverlaps = testOverlaps;
                                         bestAvgDistance = avgDistance;
                                         bestLayout = testLayout;
                                     }
@@ -936,7 +1008,7 @@
             // 布局切换后，强制更新所有引导线并重新渲染场景
             // 确保所有修改了eyeOffset的标签的引导线都能正确显示
             let updatedCount = 0;
-            labelsToAvoid.forEach((entityId) => {
+            entitiesToAvoid.forEach((entityId) => {
                 const entity = vehicleEntities.get(entityId);
                 if (entity) {
                     const point = latestPoints.get(entityId);
@@ -970,10 +1042,10 @@
             });
             
             if (updatedCount > 0) {
-                console.log(`[避让算法] 已更新 ${updatedCount} 个标签的引导线`);
+                console.log(`[避让算法] 已更新 ${updatedCount} 个实体的引导线`);
             }
             
-            // 标签避让算法完成后，强制重新渲染场景
+            // 避让算法完成后，强制重新渲染场景
             viewer.scene.requestRender();
         } catch (e) {
             console.error('[屏幕空间标签避让] 错误:', e);
